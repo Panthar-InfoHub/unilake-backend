@@ -13,6 +13,7 @@ const requriedVariables = [
   "R2_PRIVATE_BUCKET_NAME",
   "R2_PUBLIC_BUCKET_NAME",
   "R2_ENDPOINT",
+  "REDIS_URL",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -37,5 +38,8 @@ export const config = {
     publicBucket: process.env.R2_PUBLIC_BUCKET_NAME as string,
     endpoint: process.env.R2_ENDPOINT as string,
     publicUrlBase: process.env.R2_PUBLIC_URL_BASE as string,
+  },
+  redis: {
+    url: process.env.REDIS_URL as string,
   },
 };
