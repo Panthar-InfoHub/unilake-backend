@@ -1,0 +1,385 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String    @id
+  name          String
+  email         String
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ============================================================
+// COMIC CATALOGUE
+// ============================================================
+
+enum GenderTag {
+  BOY
+  GIRL
+  UNISEX
+}
+
+enum ComicStatus {
+  DRAFT
+  PUBLISHING   // publish job in progress (async sync to ComfyUI)
+  PUBLISHED
+  UNPUBLISHED
+}
+
+model Comic {
+  id                String      @id @default(uuid())
+  title             String
+  genderTag         GenderTag
+  pageCount         Int         // total pages, e.g. 24
+  freePreviewPages  Int         // e.g. 10
+  coverThumbnailUrl String?
+  loraFileUrl       String?     // R2 path to LoRA model file
+  loraStrength      Float       @default(1.0)
+  status            ComicStatus @default(DRAFT)
+  basePrice         Decimal     @db.Decimal(10, 2) // fallback price if no country rule matches
+  baseCurrency      String      @default("INR")
+  publishJobId      String?     // BullMQ job id, for polling publish status
+  publishError      String?
+
+  pages         Page[]
+  fonts         Font[]
+  pricingRules  PricingRule[]
+  orderSessions OrderSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("comics")
+}
+
+model Page {
+  id             String   @id @default(uuid())
+  comicId        String
+  comic          Comic    @relation(fields: [comicId], references: [id], onDelete: Cascade)
+
+  pageNumber     Int                       // 1–24
+  artworkUrl     String?                   // HD PNG, empty bubbles, R2 path
+  maskUrl        String?                   // PNG marking head area, R2 path
+
+  hasFace        Boolean  @default(false)  // does the child's face appear on this page
+  mirrorFace     Boolean  @default(false)  // should the face be flipped
+  faceDirection  String?                   // "front" | "three-quarter" | "side"
+  isPreviewPage  Boolean  @default(false)  // part of free preview (pages 1–10 typically)
+
+  bubbles        Bubble[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([comicId, pageNumber])
+  @@map("pages")
+}
+
+model Bubble {
+  id           String  @id @default(uuid())
+  pageId       String
+  page         Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  x            Float   // coordinates captured from drag-rectangle in admin UI
+  y            Float
+  width        Float
+  height       Float
+
+  dialogue     String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
+  fontId       String?
+  font         Font?   @relation(fields: [fontId], references: [id])
+  fontSize     Int     @default(24)
+
+  sortOrder    Int     @default(0) // order bubbles were added, for predictable rendering/debugging
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("bubbles")
+}
+
+model Font {
+  id        String   @id @default(uuid())
+  comicId   String
+  comic     Comic    @relation(fields: [comicId], references: [id], onDelete: Cascade)
+
+  name      String              // display name, e.g. "ComicSans-Bold"
+  fileUrl   String              // R2 path to .ttf/.otf
+  bubbles   Bubble[]
+
+  createdAt DateTime @default(now())
+
+  @@map("fonts")
+}
+
+// ============================================================
+// PRICING (country-based)
+// ============================================================
+
+model PricingRule {
+  id          String   @id @default(uuid())
+  comicId     String
+  comic       Comic    @relation(fields: [comicId], references: [id], onDelete: Cascade)
+
+  countryCode String   // ISO 3166-1 alpha-2, e.g. "IN", "US", "GB"
+  price       Decimal  @db.Decimal(10, 2)
+  currency    String   // ISO 4217, e.g. "INR", "USD"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([comicId, countryCode])
+  @@map("pricing_rules")
+}
+
+// ============================================================
+// COMIC-ORDER FLOW
+// Named "OrderSession" (not "Session") specifically to avoid colliding
+// with Better Auth's own Session model in this same schema file.
+// This has nothing to do with login — it's the in-progress
+// comic-creation flow for an anonymous parent/user.
+// ============================================================
+
+enum OrderSessionStatus {
+  CREATED
+  PHOTO_UPLOADED
+  GENERATING_PREVIEW   // pages 1–10 (free) generating
+  PREVIEW_READY
+  AWAITING_PAYMENT
+  PAID
+  GENERATING_PAID      // pages 11–24 generating
+  PAID_PAGES_READY
+  CONFIRMED            // user selected variants for all 24 pages
+  GENERATING_HD
+  COMPILING_PDF
+  DISPATCHED
+  COMPLETED
+  FAILED
+}
+
+enum PronounKey {
+  HE
+  SHE
+  THEY
+}
+
+model OrderSession {
+  id            String              @id @default(uuid())
+  comicId       String
+  comic         Comic               @relation(fields: [comicId], references: [id])
+
+  childName     String
+  pronounKey    PronounKey
+  status        OrderSessionStatus  @default(CREATED)
+
+  // Photo validation
+  rawPhotoUrls    String[]    // up to 2 uploaded photos, R2 paths
+  bestPhotoUrl    String?     // winner from validation pipeline
+  photoScoreJson  Json?       // breakdown of the check scores
+
+  // Shipping (collected before payment)
+  shippingName    String?
+  shippingLine1   String?
+  shippingLine2   String?
+  shippingCity    String?
+  shippingState   String?
+  shippingZip     String?
+  shippingCountry String?     // ISO alpha-2 — drives domestic vs international Shiprocket routing
+  shippingPhone   String?
+
+  wsRoomToken     String      @unique @default(uuid()) // used to authenticate WS connection
+
+  pageVersions  PageVersion[]
+  order         Order?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  expiresAt DateTime  // 24hr TTL equivalent, enforced at query time / cleanup job
+
+  @@map("order_sessions")
+}
+
+// ============================================================
+// GENERATED PAGE VERSIONS (AI pipeline output)
+// ============================================================
+
+enum PageVersionStatus {
+  QUEUED
+  GENERATING_SD
+  SD_READY
+  GENERATING_HD
+  HD_READY
+  FAILED
+}
+
+model PageVersion {
+  id              String             @id @default(uuid())
+  orderSessionId  String
+  orderSession    OrderSession       @relation(fields: [orderSessionId], references: [id], onDelete: Cascade)
+
+  pageNumber      Int
+  variantIndex    Int                @default(0) // 0,1,2... up to 3-4 free / 8 paid
+  seed            BigInt?            // ComfyUI seed used, stored for reproducibility
+
+  comfyPromptId1  String?            // style-conversion job id
+  comfyPromptId2  String?            // face-swap job id
+  comfyPromptId3  String?            // HD upscale job id
+
+  sdImageUrl      String?            // face-swapped, pre-text R2 path
+  textRenderedUrl String?            // Sharp output — text baked in (SD resolution)
+  hdImageUrl      String?            // final upscaled 2480x3508 R2 path
+
+  isSelected      Boolean            @default(false) // chosen by user at confirm step
+  status          PageVersionStatus  @default(QUEUED)
+  errorMessage    String?
+  retryCount      Int                @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderSessionId, pageNumber])
+  @@map("page_versions")
+}
+
+// ============================================================
+// ORDERS / PAYMENTS
+// ============================================================
+
+enum OrderStatus {
+  CREATED
+  PAID
+  GENERATING
+  CONFIRMED
+  PDF_READY
+  DISPATCHED
+  DELIVERED
+  FAILED
+  REFUNDED
+}
+
+model Order {
+  id              String        @id @default(uuid())
+  orderSessionId  String        @unique
+  orderSession    OrderSession  @relation(fields: [orderSessionId], references: [id])
+
+  amount      Decimal     @db.Decimal(10, 2)
+  currency    String
+  countryCode String      // snapshot of country used for pricing lookup at order time
+
+  razorpayOrderId   String?  @unique
+  razorpayPaymentId String?  @unique
+  status            OrderStatus @default(CREATED)
+
+  pdfUrl            String?     // R2 path, 30-day retention
+  pdfDownloadUrl    String?     // signed URL, 7-day validity
+  pdfDownloadExpiry DateTime?
+
+  shiprocketOrderId String?
+  awbNumber          String?
+  courierName        String?
+  trackingStatus     String?
+  trackingUpdatedAt  DateTime?
+  isInternational    Boolean    @default(false)
+
+  printVendorOrderId String?    // e.g. Gelato order reference
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  webhookEvents WebhookEvent[]
+
+  @@map("orders")
+}
+
+// Idempotency tracking for Razorpay + Shiprocket webhooks
+model WebhookEvent {
+  id            String   @id @default(uuid())
+  orderId       String?
+  order         Order?   @relation(fields: [orderId], references: [id])
+
+  source        String   // "razorpay" | "shiprocket"
+  eventId       String   @unique // razorpay_payment_id or shiprocket event id — prevents double-processing
+  eventType     String
+  payloadJson   Json
+  processedAt   DateTime @default(now())
+
+  @@map("webhook_events")
+}
+
+// ============================================================
+// SYSTEM CONFIG (tokens, feature flags, vendor settings)
+// ============================================================
+
+model SystemConfig {
+  key       String   @id  // e.g. "shiprocket_token", "shiprocket_token_expiry"
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+
+  @@map("system_config")
+}

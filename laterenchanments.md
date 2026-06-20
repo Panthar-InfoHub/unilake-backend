@@ -1,0 +1,1 @@
+- in r2.ts file the getSIgnedUploadUrl currently doesn't cap the file size that is going to be uploaded using thisa URL later we can put the cap here that only this amount of file should be uploaded using this URL
