@@ -12,7 +12,7 @@ export const hdWorker = new Worker(
     logger.info({ jobId: job.id }, "[HD Worker] Stub processing complete");
     return { success: true, message: "HD generation stub completed" };
   },
-  { connection: redisClient as any, concurrency: 1 }
+  { connection: redisClient, concurrency: 1 }
 );
 
 hdWorker.on("failed", (job, err) => {

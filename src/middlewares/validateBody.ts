@@ -13,5 +13,6 @@ export const validateBody = (schema: ZodSchema<any>) => {
       return next(new ValidationError(`Validation failed - ${errorMessages}`));
     }
     req.body = result.data;
+    return next();
   };
 };

@@ -12,7 +12,7 @@ export const pdfWorker = new Worker(
     logger.info({ jobId: job.id }, "[PDF Worker] Stub processing complete");
     return { success: true, message: "PDF compilation stub completed" };
   },
-  { connection: redisClient as any, concurrency: 5 }
+  { connection: redisClient, concurrency: 5 }
 );
 
 pdfWorker.on("failed", (job, err) => {

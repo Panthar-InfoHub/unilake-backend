@@ -19,7 +19,7 @@ export const sdWorker = new Worker(
     logger.info({ jobId: job.id }, "[SD Worker] Stub processing complete");
     return { success: true, message: "SD generation stub completed" };
   },
-  { connection: redisClient as any, concurrency: 3 }
+  { connection: redisClient, concurrency: 3 }
 );
 
 // Monitor for unexpected failures

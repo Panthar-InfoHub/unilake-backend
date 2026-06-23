@@ -14,6 +14,10 @@ const requriedVariables = [
   "R2_PUBLIC_BUCKET_NAME",
   "R2_ENDPOINT",
   "REDIS_URL",
+  "FACEBOOK_CLIENT_ID",
+  "FACEBOOK_CLIENT_SECRET",
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -30,6 +34,10 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || "development",
   DATABASE_URL: process.env.DATABASE_URL,
   DIRECT_URL: process.env.DIRECT_URL,
+  googleId : process.env.GOOGLE_CLIENT_ID as string,
+  googleSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+  facebookId: process.env.FACEBOOK_CLIENT_ID as string,
+  facebookSecret: process.env.FACEBOOK_CLIENT_SECRET as string,
   r2: {
     accountId: process.env.R2_ACCOUNT_ID as string,
     accessKeyId: process.env.R2_ACCESS_KEY_ID as string,

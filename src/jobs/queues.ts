@@ -21,7 +21,7 @@ const defaultJobOptions: DefaultJobOptions = {
  * Used for fast, low-res preview generations.
  */
 export const sdGenerationQueue = new Queue("sd-generation", {
-  connection: redisClient as any,
+  connection: redisClient,
   defaultJobOptions,
 });
 
@@ -30,7 +30,7 @@ export const sdGenerationQueue = new Queue("sd-generation", {
  * Used for the final, computationally heavy upscaling tasks.
  */
 export const hdGenerationQueue = new Queue("hd-generation", {
-  connection: redisClient as any,
+  connection: redisClient,
   defaultJobOptions,
 });
 
@@ -38,6 +38,6 @@ export const hdGenerationQueue = new Queue("hd-generation", {
  * Queue for compiling finished generation assets into downloadable PDFs.
  */
 export const pdfCompilationQueue = new Queue("pdf-compilation", {
-  connection: redisClient as any,
+  connection: redisClient,
   defaultJobOptions,
 });

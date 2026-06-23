@@ -7,7 +7,7 @@ import { sdWorker } from "./sdWorker.js";
  * Initializes all background workers and registers graceful shutdown handlers.
  */
 export const initJobs = () => {
-  logger.info("⚙️  Initializing background job workers...");
+  logger.info("Initializing background job workers...");
 
   // Instantiate/activate the workers by referencing them
   const workers = [sdWorker, hdWorker, pdfWorker];

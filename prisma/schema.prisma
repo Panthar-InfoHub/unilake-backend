@@ -22,6 +22,7 @@ model User {
   updatedAt     DateTime  @updatedAt
   sessions      Session[]
   accounts      Account[]
+  role          String    @default("USER")
 
   @@unique([email])
   @@map("user")
@@ -87,7 +88,7 @@ enum GenderTag {
 
 enum ComicStatus {
   DRAFT
-  PUBLISHING   // publish job in progress (async sync to ComfyUI)
+  PUBLISHING // publish job in progress (async sync to ComfyUI)
   PUBLISHED
   UNPUBLISHED
 }
@@ -96,15 +97,13 @@ model Comic {
   id                String      @id @default(uuid())
   title             String
   genderTag         GenderTag
-  pageCount         Int         // total pages, e.g. 24
-  freePreviewPages  Int         // e.g. 10
+  pageCount         Int
+  freePreviewPages  Int
   coverThumbnailUrl String?
-  loraFileUrl       String?     // R2 path to LoRA model file
+  loraFileUrl       String?
   loraStrength      Float       @default(1.0)
   status            ComicStatus @default(DRAFT)
-  basePrice         Decimal     @db.Decimal(10, 2) // fallback price if no country rule matches
-  baseCurrency      String      @default("INR")
-  publishJobId      String?     // BullMQ job id, for polling publish status
+  publishJobId      String?
   publishError      String?
 
   pages         Page[]
@@ -119,20 +118,20 @@ model Comic {
 }
 
 model Page {
-  id             String   @id @default(uuid())
-  comicId        String
-  comic          Comic    @relation(fields: [comicId], references: [id], onDelete: Cascade)
+  id      String @id @default(uuid())
+  comicId String
+  comic   Comic  @relation(fields: [comicId], references: [id], onDelete: Cascade)
 
-  pageNumber     Int                       // 1–24
-  artworkUrl     String?                   // HD PNG, empty bubbles, R2 path
-  maskUrl        String?                   // PNG marking head area, R2 path
+  pageNumber Int // 1–24
+  artworkUrl String? // HD PNG, empty bubbles, R2 path
+  maskUrl    String? // PNG marking head area, R2 path
 
-  hasFace        Boolean  @default(false)  // does the child's face appear on this page
-  mirrorFace     Boolean  @default(false)  // should the face be flipped
-  faceDirection  String?                   // "front" | "three-quarter" | "side"
-  isPreviewPage  Boolean  @default(false)  // part of free preview (pages 1–10 typically)
+  hasFace       Boolean @default(false) // does the child's face appear on this page
+  mirrorFace    Boolean @default(false) // should the face be flipped
+  faceDirection String? // "front" | "three-quarter" | "side"
+  isPreviewPage Boolean @default(false) // part of free preview (pages 1–10 typically)
 
-  bubbles        Bubble[]
+  bubbles Bubble[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -142,21 +141,21 @@ model Page {
 }
 
 model Bubble {
-  id           String  @id @default(uuid())
-  pageId       String
-  page         Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  id     String @id @default(uuid())
+  pageId String
+  page   Page   @relation(fields: [pageId], references: [id], onDelete: Cascade)
 
-  x            Float   // coordinates captured from drag-rectangle in admin UI
-  y            Float
-  width        Float
-  height       Float
+  x      Float // coordinates captured from drag-rectangle in admin UI
+  y      Float
+  width  Float
+  height Float
 
-  dialogue     String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
-  fontId       String?
-  font         Font?   @relation(fields: [fontId], references: [id])
-  fontSize     Int     @default(24)
+  dialogue String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
+  fontId   String?
+  font     Font?   @relation(fields: [fontId], references: [id])
+  fontSize Int     @default(24)
 
-  sortOrder    Int     @default(0) // order bubbles were added, for predictable rendering/debugging
+  sortOrder Int @default(0) // order bubbles were added, for predictable rendering/debugging
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -165,13 +164,13 @@ model Bubble {
 }
 
 model Font {
-  id        String   @id @default(uuid())
-  comicId   String
-  comic     Comic    @relation(fields: [comicId], references: [id], onDelete: Cascade)
+  id      String @id @default(uuid())
+  comicId String
+  comic   Comic  @relation(fields: [comicId], references: [id], onDelete: Cascade)
 
-  name      String              // display name, e.g. "ComicSans-Bold"
-  fileUrl   String              // R2 path to .ttf/.otf
-  bubbles   Bubble[]
+  name    String // display name, e.g. "ComicSans-Bold"
+  fileUrl String // R2 path to .ttf/.otf
+  bubbles Bubble[]
 
   createdAt DateTime @default(now())
 
@@ -183,18 +182,18 @@ model Font {
 // ============================================================
 
 model PricingRule {
-  id          String   @id @default(uuid())
-  comicId     String
-  comic       Comic    @relation(fields: [comicId], references: [id], onDelete: Cascade)
+  id      String @id @default(uuid())
+  comicId String
+  comic   Comic  @relation(fields: [comicId], references: [id], onDelete: Cascade)
 
-  countryCode String   // ISO 3166-1 alpha-2, e.g. "IN", "US", "GB"
-  price       Decimal  @db.Decimal(10, 2)
-  currency    String   // ISO 4217, e.g. "INR", "USD"
+  countryId String
+  country   Country @relation(fields: [countryId], references: [id])
+  price       Decimal @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([comicId, countryCode])
+  @@unique([comicId, countryId])
   @@map("pricing_rules")
 }
 
@@ -209,13 +208,13 @@ model PricingRule {
 enum OrderSessionStatus {
   CREATED
   PHOTO_UPLOADED
-  GENERATING_PREVIEW   // pages 1–10 (free) generating
+  GENERATING_PREVIEW // pages 1–10 (free) generating
   PREVIEW_READY
   AWAITING_PAYMENT
   PAID
-  GENERATING_PAID      // pages 11–24 generating
+  GENERATING_PAID // pages 11–24 generating
   PAID_PAGES_READY
-  CONFIRMED            // user selected variants for all 24 pages
+  CONFIRMED // user selected variants for all 24 pages
   GENERATING_HD
   COMPILING_PDF
   DISPATCHED
@@ -230,18 +229,18 @@ enum PronounKey {
 }
 
 model OrderSession {
-  id            String              @id @default(uuid())
-  comicId       String
-  comic         Comic               @relation(fields: [comicId], references: [id])
+  id      String @id @default(uuid())
+  comicId String
+  comic   Comic  @relation(fields: [comicId], references: [id])
 
-  childName     String
-  pronounKey    PronounKey
-  status        OrderSessionStatus  @default(CREATED)
+  childName  String
+  pronounKey PronounKey
+  status     OrderSessionStatus @default(CREATED)
 
   // Photo validation
-  rawPhotoUrls    String[]    // up to 2 uploaded photos, R2 paths
-  bestPhotoUrl    String?     // winner from validation pipeline
-  photoScoreJson  Json?       // breakdown of the check scores
+  rawPhotoUrls   String[] // up to 2 uploaded photos, R2 paths
+  bestPhotoUrl   String? // winner from validation pipeline
+  photoScoreJson Json? // breakdown of the check scores
 
   // Shipping (collected before payment)
   shippingName    String?
@@ -250,17 +249,17 @@ model OrderSession {
   shippingCity    String?
   shippingState   String?
   shippingZip     String?
-  shippingCountry String?     // ISO alpha-2 — drives domestic vs international Shiprocket routing
+  shippingCountry String? // ISO alpha-2 — drives domestic vs international Shiprocket routing
   shippingPhone   String?
 
-  wsRoomToken     String      @unique @default(uuid()) // used to authenticate WS connection
+  wsRoomToken String @unique @default(uuid()) // used to authenticate WS connection
 
-  pageVersions  PageVersion[]
-  order         Order?
+  pageVersions PageVersion[]
+  order        Order?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  expiresAt DateTime  // 24hr TTL equivalent, enforced at query time / cleanup job
+  expiresAt DateTime // 24hr TTL equivalent, enforced at query time / cleanup job
 
   @@map("order_sessions")
 }
@@ -279,26 +278,26 @@ enum PageVersionStatus {
 }
 
 model PageVersion {
-  id              String             @id @default(uuid())
-  orderSessionId  String
-  orderSession    OrderSession       @relation(fields: [orderSessionId], references: [id], onDelete: Cascade)
+  id             String       @id @default(uuid())
+  orderSessionId String
+  orderSession   OrderSession @relation(fields: [orderSessionId], references: [id], onDelete: Cascade)
 
-  pageNumber      Int
-  variantIndex    Int                @default(0) // 0,1,2... up to 3-4 free / 8 paid
-  seed            BigInt?            // ComfyUI seed used, stored for reproducibility
+  pageNumber   Int
+  variantIndex Int     @default(0) // 0,1,2... up to 3-4 free / 8 paid
+  seed         BigInt? // ComfyUI seed used, stored for reproducibility
 
-  comfyPromptId1  String?            // style-conversion job id
-  comfyPromptId2  String?            // face-swap job id
-  comfyPromptId3  String?            // HD upscale job id
+  comfyPromptId1 String? // style-conversion job id
+  comfyPromptId2 String? // face-swap job id
+  comfyPromptId3 String? // HD upscale job id
 
-  sdImageUrl      String?            // face-swapped, pre-text R2 path
-  textRenderedUrl String?            // Sharp output — text baked in (SD resolution)
-  hdImageUrl      String?            // final upscaled 2480x3508 R2 path
+  sdImageUrl      String? // face-swapped, pre-text R2 path
+  textRenderedUrl String? // Sharp output — text baked in (SD resolution)
+  hdImageUrl      String? // final upscaled 2480x3508 R2 path
 
-  isSelected      Boolean            @default(false) // chosen by user at confirm step
-  status          PageVersionStatus  @default(QUEUED)
-  errorMessage    String?
-  retryCount      Int                @default(0)
+  isSelected   Boolean           @default(false) // chosen by user at confirm step
+  status       PageVersionStatus @default(QUEUED)
+  errorMessage String?
+  retryCount   Int               @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -324,30 +323,30 @@ enum OrderStatus {
 }
 
 model Order {
-  id              String        @id @default(uuid())
-  orderSessionId  String        @unique
-  orderSession    OrderSession  @relation(fields: [orderSessionId], references: [id])
+  id             String       @id @default(uuid())
+  orderSessionId String       @unique
+  orderSession   OrderSession @relation(fields: [orderSessionId], references: [id])
 
-  amount      Decimal     @db.Decimal(10, 2)
+  amount      Decimal @db.Decimal(10, 2)
   currency    String
-  countryCode String      // snapshot of country used for pricing lookup at order time
+  countryCode String // snapshot of country used for pricing lookup at order time
 
-  razorpayOrderId   String?  @unique
-  razorpayPaymentId String?  @unique
+  razorpayOrderId   String?     @unique
+  razorpayPaymentId String?     @unique
   status            OrderStatus @default(CREATED)
 
-  pdfUrl            String?     // R2 path, 30-day retention
-  pdfDownloadUrl    String?     // signed URL, 7-day validity
+  pdfUrl            String? // R2 path, 30-day retention
+  pdfDownloadUrl    String? // signed URL, 7-day validity
   pdfDownloadExpiry DateTime?
 
   shiprocketOrderId String?
-  awbNumber          String?
-  courierName        String?
-  trackingStatus     String?
-  trackingUpdatedAt  DateTime?
-  isInternational    Boolean    @default(false)
+  awbNumber         String?
+  courierName       String?
+  trackingStatus    String?
+  trackingUpdatedAt DateTime?
+  isInternational   Boolean   @default(false)
 
-  printVendorOrderId String?    // e.g. Gelato order reference
+  printVendorOrderId String? // e.g. Gelato order reference
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -358,16 +357,17 @@ model Order {
 }
 
 // Idempotency tracking for Razorpay + Shiprocket webhooks
-model WebhookEvent {
-  id            String   @id @default(uuid())
-  orderId       String?
-  order         Order?   @relation(fields: [orderId], references: [id])
 
-  source        String   // "razorpay" | "shiprocket"
-  eventId       String   @unique // razorpay_payment_id or shiprocket event id — prevents double-processing
-  eventType     String
-  payloadJson   Json
-  processedAt   DateTime @default(now())
+model WebhookEvent {
+  id      String  @id @default(uuid())
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id])
+
+  source      String // "razorpay" | "shiprocket"
+  eventId     String   @unique // razorpay_payment_id or shiprocket event id — prevents double-processing
+  eventType   String
+  payloadJson Json
+  processedAt DateTime @default(now())
 
   @@map("webhook_events")
 }
@@ -377,9 +377,21 @@ model WebhookEvent {
 // ============================================================
 
 model SystemConfig {
-  key       String   @id  // e.g. "shiprocket_token", "shiprocket_token_expiry"
+  key       String   @id // e.g. "shiprocket_token", "shiprocket_token_expiry"
   value     String   @db.Text
   updatedAt DateTime @updatedAt
 
   @@map("system_config")
+}
+
+
+model Country {
+  id           String  @id @default(uuid())
+  code         String  @unique // ISO 3166-1 alpha-2, e.g. "IN", "US"
+  name         String             // e.g. "India", "United States"
+  currencyCode String             // ISO 4217, e.g. "INR", "USD"
+  flagUrl      String             // R2 public bucket path to the flag image
+  isActive     Boolean @default(true)
+
+  pricingRules PricingRule[]
 }
