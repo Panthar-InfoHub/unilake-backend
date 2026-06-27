@@ -235,6 +235,7 @@ model OrderSession {
 
   childName  String
   pronounKey PronounKey
+  age        Int
   status     OrderSessionStatus @default(CREATED)
 
   // Photo validation
