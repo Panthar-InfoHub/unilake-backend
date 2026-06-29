@@ -176,20 +176,25 @@ function isSessionCompleteForGeneration(
 
 async function enqueuePreviewGenerationJobs(
   orderSessionId: string,
+  comicId: string,
   freePreviewPages: number
 ): Promise<number> {
-  const jobs = [];
-  for (let pageNumber = 1; pageNumber <= freePreviewPages; pageNumber++) {
-    jobs.push(
-      sdGenerationQueue.add("generate-page", {
-        orderSessionId,
-        pageNumber,
-        variantIndex: 0,
-      })
-    );
-  }
+  const previewPages = await prisma.page.findMany({
+    where: { comicId, pageNumber: { lte: freePreviewPages } },
+    orderBy: { pageNumber: "asc" },
+  });
+
+  const jobs = previewPages.map((page) => {
+    sdGenerationQueue.add("generate--page", {
+      orderSessionId,
+      pageId: page.id,
+      pageNumber: page.pageNumber,
+      variantIndex: 0,
+    });
+  });
+
   await Promise.all(jobs);
-  return freePreviewPages;
+  return previewPages.length;
 }
 
 const GENERATABLE_STATUSES: OrderSessionStatus[] = [
@@ -228,6 +233,7 @@ export async function triggerGeneration(sessionId: string) {
 
   const jobsEnqueued = await enqueuePreviewGenerationJobs(
     sessionId,
+    session.comicId,
     session.comic.freePreviewPages
   );
 
@@ -253,6 +259,14 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
     throw new NotFoundError("OrderSession not found");
   }
 
+  const page = await prisma.page.findUnique({
+    where: { comicId_pageNumber: { comicId: session.comicId, pageNumber } },
+  });
+
+  if (!page) {
+    throw new NotFoundError(`Page ${pageNumber} does not exist for this comic`);
+  }
+
   const isHdStage = HD_STAGE_STATUSES.includes(session.status);
   const isSdStage = SD_STAGE_STATUSES.includes(session.status);
 
@@ -263,7 +277,7 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
   }
 
   const existingVariantCount = await prisma.pageVersion.count({
-    where: { orderSessionId: sessionId, pageNumber },
+    where: { orderSessionId: sessionId, pageId: page.id },
   });
 
   const cap = isHdStage ? MAX_HD_VARIANTS_PER_PAGE : MAX_SD_VARIANTS_PER_PAGE;
@@ -278,10 +292,11 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
 
   await queue.add("generate-page", {
     orderSessionId: sessionId,
-    pageNumber,
+    pageId: page.id,
+    pageNumber, // descriptive only — see note below
     variantIndex: existingVariantCount,
   });
-
+  
   return {
     queued: true,
     pageNumber,

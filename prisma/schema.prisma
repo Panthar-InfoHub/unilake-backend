@@ -132,7 +132,7 @@ model Page {
   isPreviewPage Boolean @default(false) // part of free preview (pages 1–10 typically)
 
   bubbles Bubble[]
-
+  pageVersion PageVersion[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -148,7 +148,7 @@ model Bubble {
   x      Float // coordinates captured from drag-rectangle in admin UI
   y      Float
   width  Float
-  height Float
+height Float
 
   dialogue String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
   fontId   String?
@@ -283,7 +283,10 @@ model PageVersion {
   orderSessionId String
   orderSession   OrderSession @relation(fields: [orderSessionId], references: [id], onDelete: Cascade)
 
-  pageNumber   Int
+  // pageNumber   Int
+  pageId String
+  page   Page   @relation(fields: [pageId], references: [id])
+
   variantIndex Int     @default(0) // 0,1,2... up to 3-4 free / 8 paid
   seed         BigInt? // ComfyUI seed used, stored for reproducibility
 
@@ -303,8 +306,8 @@ model PageVersion {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([orderSessionId, pageNumber, variantIndex])
-  @@index([orderSessionId, pageNumber])
+  @@unique([orderSessionId, pageId, variantIndex])
+  @@index([orderSessionId, pageId])
   @@map("page_versions")
 }
 
