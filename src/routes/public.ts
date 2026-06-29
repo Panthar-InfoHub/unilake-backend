@@ -5,7 +5,7 @@ import {
 } from "../controllers/comic.controller.js";
 import { validateBody } from "../middlewares/validateBody.js";
 import { createSessionSchema, photoUploadUrlSchema, photoValidateSchema, updateSessionSchema   } from "../validators/session.schema.js";
-import { createPhotoUploadUrlHandler, createSessionHandler,getSessionHandler, updateSessionHandler, validateSessionPhotoHandler } from "../controllers/session.controller.js";
+import { createPhotoUploadUrlHandler, createSessionHandler,getSessionHandler, updateSessionHandler, validateSessionPhotoHandler, generateSessionHandler, regeneratePageHandler  } from "../controllers/session.controller.js";
 const router = Router();
 
 router.get("/comics", getPublicComicsHandler);
@@ -21,5 +21,9 @@ router.post('/sessions/:sessionId/photo/upload-url', validateBody(photoUploadUrl
 
 
 router.post( '/sessions/:sessionId/photo/validate', validateBody(photoValidateSchema), validateSessionPhotoHandler );
+
+router.post("/sessions/:sessionId/generate", generateSessionHandler);
+
+router.post("/sessions/:sessionId/pages/:pageNumber/regenerate", regeneratePageHandler);
 
 export default router;

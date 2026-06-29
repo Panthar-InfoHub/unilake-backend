@@ -303,6 +303,7 @@ model PageVersion {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([orderSessionId, pageNumber, variantIndex])
   @@index([orderSessionId, pageNumber])
   @@map("page_versions")
 }

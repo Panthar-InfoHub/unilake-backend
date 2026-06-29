@@ -1,7 +1,9 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { createOrderSession, createPhotoUploadUrl, getOrderSessionId, updateOrderSession, validateSessionPhoto } from "../services/session.service.js";
+import { createOrderSession, createPhotoUploadUrl, getOrderSessionId, updateOrderSession, validateSessionPhoto, triggerGeneration, regeneratePage } from "../services/session.service.js";
+import { regeneratePageParamsSchema } from "../validators/regenerate.schema.js";
 import { ValidationError } from "../utils/errors.js";
+import { generateSessionParamsSchema } from "../validators/generate.schema.js";
 
 
 export const createSessionHandler = asyncHandler(async(req: Request, res: Response) => {
@@ -56,6 +58,28 @@ export const validateSessionPhotoHandler = asyncHandler(async (req, res) => {
 
   const { key } = req.body;
   const result = await validateSessionPhoto(sessionId, key);
+
+  res.status(200).json(result);
+});
+
+export const generateSessionHandler = asyncHandler(async (req, res) => {
+  const { sessionId } = generateSessionParamsSchema.parse({
+    sessionId: req.params.sessionId,
+  });
+
+  const result = await triggerGeneration(sessionId);
+
+  res.status(200).json(result);
+})
+
+
+export const regeneratePageHandler = asyncHandler(async (req, res) => {
+  const { sessionId, pageNumber } = regeneratePageParamsSchema.parse({
+    sessionId: req.params.sessionId,
+    pageNumber: req.params.pageNumber,
+  });
+
+  const result = await regeneratePage(sessionId, pageNumber);
 
   res.status(200).json(result);
 });
