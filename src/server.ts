@@ -2,12 +2,12 @@ import http from 'http'
 import app from './app.js';
 import { config } from './config/env.js';
 import { logger } from './lib/logger.js';
-// import { setupWebSocket } from './websocket/wsServer.js'
+import { setupWebSocket } from './websocket/wsServer.js';
 import { initJobs } from './jobs/workers/index.js';
 
 
 const server = http.createServer(app) 
-// setupWebSocket(server)
+setupWebSocket(server)
 initJobs();
 
 server.listen(config.port, () => {

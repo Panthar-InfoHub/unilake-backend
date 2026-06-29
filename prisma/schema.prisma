@@ -233,9 +233,9 @@ model OrderSession {
   comicId String
   comic   Comic  @relation(fields: [comicId], references: [id])
 
-  childName  String
-  pronounKey PronounKey
-  age        Int
+  childName  String?
+  pronounKey PronounKey?
+  age        Int?
   status     OrderSessionStatus @default(CREATED)
 
   // Photo validation
