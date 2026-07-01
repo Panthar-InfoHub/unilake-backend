@@ -1,0 +1,2 @@
+- the comic pages's doesnt have the preview page yet which should be shown on the public facing URL 
+- the comic thumbnail will have two images for 

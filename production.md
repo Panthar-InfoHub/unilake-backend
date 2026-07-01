@@ -1,2 +1,3 @@
 - change the URL on the google , facbook to authorirzed URL 
 - change the URL of what we are doing currently as well 
+- LORA FILE is not done yet we will figure that out later

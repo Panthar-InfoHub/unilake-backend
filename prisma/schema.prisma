@@ -130,6 +130,7 @@ model Page {
   mirrorFace    Boolean @default(false) // should the face be flipped
   faceDirection String? // "front" | "three-quarter" | "side"
   isPreviewPage Boolean @default(false) // part of free preview (pages 1–10 typically)
+  pagePrompt String? @db.Text
 
   bubbles Bubble[]
   pageVersion PageVersion[]
@@ -148,7 +149,7 @@ model Bubble {
   x      Float // coordinates captured from drag-rectangle in admin UI
   y      Float
   width  Float
-height Float
+  height Float
 
   dialogue String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
   fontId   String?

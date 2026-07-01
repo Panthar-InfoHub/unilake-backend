@@ -2,12 +2,19 @@ import { randomUUID } from "node:crypto";
 import { getPublicUrl, getSignedUploadUrl } from "../lib/r2.js";
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
-import { ConflictError, NotFoundError, ValidationError } from "../utils/errors.js";
+import {
+  ConflictError,
+  NotFoundError,
+  ValidationError,
+} from "../utils/errors.js";
 import type {
   CreateComicInput,
+  GetLoraUploadUrlInput,
   UpdateComicPricingInput,
-  UpdateComicStatusInput
+  UpdateComicStatusInput,
 } from "../validators/comic.schema.js";
+import type { Prisma } from "../generated/prisma/client.js";
+import type { UpdateComicInput } from "../validators/comic.schema.js";
 
 export const generateThumbnailUploadUrl = async (
   fileName: string,
@@ -34,7 +41,7 @@ export const createComic = async (data: CreateComicInput) => {
       "Attempting to create new comic catalogue item..."
     );
 
-    const { thumbnailKey, pricing, ...restData } = data;
+    const { thumbnailKey, pricing, loraKey, ...restData } = data;
 
     const coverThumbnailUrl = getPublicUrl(thumbnailKey);
 
@@ -44,6 +51,7 @@ export const createComic = async (data: CreateComicInput) => {
           ...restData,
           coverThumbnailUrl,
           status: "DRAFT",
+          ...(loraKey !== undefined && { loraFileUrl: loraKey }),
         },
       });
 
@@ -72,6 +80,44 @@ export const createComic = async (data: CreateComicInput) => {
       );
     }
 
+    throw error;
+  }
+};
+
+export const updateComic = async (comicId: string, data: UpdateComicInput) => {
+  try {
+    const comic = await prisma.comic.findUnique({ where: { id: comicId } });
+
+    if (!comic) {
+      throw new NotFoundError("Comic not found.");
+    }
+
+    const updateData: Prisma.ComicUpdateInput = {};
+
+    if (data.title !== undefined) updateData.title = data.title;
+    if (data.genderTag !== undefined) updateData.genderTag = data.genderTag;
+    if (data.pageCount !== undefined) updateData.pageCount = data.pageCount;
+    if (data.freePreviewPages !== undefined) updateData.freePreviewPages = data.freePreviewPages;
+    if (data.loraStrength !== undefined) updateData.loraStrength = data.loraStrength;
+    if (data.loraKey !== undefined) updateData.loraFileUrl = data.loraKey;
+    // if (data.generationPrompt !== undefined)
+    //   updateData.generationPrompt = data.generationPrompt;
+    // if (data.generationNegativePrompt !== undefined)
+    //   updateData.generationNegativePrompt = data.generationNegativePrompt;
+
+    const updatedComic = await prisma.comic.update({
+      where: { id: comicId },
+      data: updateData,
+    });
+
+    logger.info(
+      { comicId, updatedFields: Object.keys(updateData) },
+      "Successfully updated comic"
+    );
+
+    return updatedComic;
+  } catch (error: any) {
+    logger.error({ err: error, comicId }, "Failed to update comic");
     throw error;
   }
 };
@@ -121,13 +167,13 @@ export const updateComicPricing = async (
   }
 };
 
-export const getComicPricing = async (comicId: string) =>{
+export const getComicPricing = async (comicId: string) => {
   try {
     logger.debug({ comicId }, "Fetching pricing rules for comic...");
 
     const comicExists = await prisma.comic.findUnique({
       where: { id: comicId },
-      select: { id: true }, 
+      select: { id: true },
     });
 
     if (!comicExists) {
@@ -156,14 +202,23 @@ export const getComicPricing = async (comicId: string) =>{
 
     return pricingRules;
   } catch (error: any) {
-    logger.error({ err: error, comicId }, "Failed to fetch comic pricing rules");
+    logger.error(
+      { err: error, comicId },
+      "Failed to fetch comic pricing rules"
+    );
     throw error;
   }
-}
+};
 
-export const updateComicStatus = async (comicId: string, data: UpdateComicStatusInput) => {
+export const updateComicStatus = async (
+  comicId: string,
+  data: UpdateComicStatusInput
+) => {
   try {
-    logger.info({ comicId, targetStatus: data.status }, "Attempting to update comic status...");
+    logger.info(
+      { comicId, targetStatus: data.status },
+      "Attempting to update comic status..."
+    );
 
     const comic = await prisma.comic.findUnique({
       where: { id: comicId },
@@ -176,11 +231,15 @@ export const updateComicStatus = async (comicId: string, data: UpdateComicStatus
 
     if (data.status === "PUBLISHED") {
       if (!comic.coverThumbnailUrl) {
-        throw new ValidationError("Cannot publish comic: Missing cover thumbnail.");
+        throw new ValidationError(
+          "Cannot publish comic: Missing cover thumbnail."
+        );
       }
-      
+
       if (comic.pricingRules.length === 0) {
-        throw new ValidationError("Cannot publish comic: At least one pricing rule is required.");
+        throw new ValidationError(
+          "Cannot publish comic: At least one pricing rule is required."
+        );
       }
     }
 
@@ -189,20 +248,24 @@ export const updateComicStatus = async (comicId: string, data: UpdateComicStatus
       data: { status: data.status },
     });
 
-    logger.info({ comicId, newStatus: updatedComic.status }, "Successfully updated comic status");
+    logger.info(
+      { comicId, newStatus: updatedComic.status },
+      "Successfully updated comic status"
+    );
     return updatedComic;
-
   } catch (error: any) {
     logger.error({ err: error, comicId }, "Failed to update comic status");
     throw error;
   }
 };
 
-export const getPublicComicsList = async (gender?: "BOY" | "GIRL" | "UNISEX") => {
+export const getPublicComicsList = async (
+  gender?: "BOY" | "GIRL" | "UNISEX"
+) => {
   return await prisma.comic.findMany({
-    where : {
+    where: {
       status: "PUBLISHED",
-      ...(gender&& { genderTag: gender }),
+      ...(gender && { genderTag: gender }),
     },
     select: {
       id: true,
@@ -211,28 +274,28 @@ export const getPublicComicsList = async (gender?: "BOY" | "GIRL" | "UNISEX") =>
       pageCount: true,
       coverThumbnailUrl: true,
       pricingRules: {
-        select:{
+        select: {
           price: true,
-          country:{
-            select : {
-              code : true,
+          country: {
+            select: {
+              code: true,
               name: true,
               flagUrl: true,
-              currencyCode: true
+              currencyCode: true,
             },
           },
         },
       },
     },
     orderBy: { createdAt: "desc" },
-  })
-}
+  });
+};
 
-export const getPublicComicDetails = async (comicId : string) => {
-  const comic =  await prisma.comic.findFirst({
-    where : {
-      id : comicId,
-      status : "PUBLISHED",
+export const getPublicComicDetails = async (comicId: string) => {
+  const comic = await prisma.comic.findFirst({
+    where: {
+      id: comicId,
+      status: "PUBLISHED",
     },
     select: {
       id: true,
@@ -245,17 +308,17 @@ export const getPublicComicDetails = async (comicId : string) => {
         select: {
           price: true,
           country: {
-            select :{
-              code : true,
-              name : true,
+            select: {
+              code: true,
+              name: true,
               flagUrl: true,
               currencyCode: true,
             },
           },
         },
       },
-      pages : {
-        where  : {isPreviewPage: true},
+      pages: {
+        where: { isPreviewPage: true },
         orderBy: { pageNumber: "asc" },
         select: {
           id: true,
@@ -271,4 +334,22 @@ export const getPublicComicDetails = async (comicId : string) => {
   }
 
   return comic;
-}
+};
+
+const LORA_UPLOAD_EXPIRY_SECONDS = 60 * 60;
+
+export const getLoraUploadUrl = async (input: GetLoraUploadUrlInput) => {
+  const safeFileName = input.fileName.replace(/[^a-zA-Z0-9.-]/g, "_");
+  const key = `comics/lora/${Date.now()}-${safeFileName}`;
+
+  const uploadUrl = await getSignedUploadUrl(
+    "private",
+    key,
+    "application/octet-stream",
+    LORA_UPLOAD_EXPIRY_SECONDS
+  );
+
+  logger.info({ key }, "Generated LoRA upload URL");
+
+  return { uploadUrl, key };
+};

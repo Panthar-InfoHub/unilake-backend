@@ -11,8 +11,10 @@ import {
   updateComicStatus,
   getPublicComicsList,
   getPublicComicDetails,
+  updateComic,
+  getLoraUploadUrl,
 } from "../services/comic.service.js";
-import { comicFilterQuerySchema } from "../validators/comic.schema.js";
+import { comicFilterQuerySchema, getLoraUploadUrlSchema } from "../validators/comic.schema.js";
 
 const uploadThumbnailRequestSchema = z.object({
   fileName: z.string().min(1, "File name is required"),
@@ -75,6 +77,20 @@ export const createComicHandler = asyncHandler(
       message: "Comic catalogue item created successfully.",
       data: newComic,
     });
+  }
+);
+
+export const updateComicHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { comicId } = req.params;
+
+    if (!comicId || typeof comicId !== "string") {
+      throw new ValidationError("comicId param is required");
+    }
+
+    const updatedComic = await updateComic(comicId, req.body);
+
+    res.status(200).json(updatedComic);
   }
 );
 
@@ -187,3 +203,11 @@ export const getPublicComicDetailsHandler = asyncHandler(async (req: Request, re
     data: comic,
   });
 });
+
+//
+export const getLoraUploadUrlHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const result = await getLoraUploadUrl(req.body);
+    res.status(200).json(result);
+  }
+);

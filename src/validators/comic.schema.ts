@@ -38,14 +38,15 @@ export const createComicSchema = z
         })
       )
       .min(1, "You must provide at least one pricing rule for the comic."),
+
+    loraKey: z.string().min(1).optional(),
+    loraStrength: z.number().min(0).max(2).optional(),
   })
   .refine((data) => data.freePreviewPages < data.pageCount, {
     message:
       "Free preview pages must be strictly less than the total page count.",
     path: ["freePreviewPages"],
   });
-
-
 
 export const updateComicPricingSchema = z.object({
   pricing: z
@@ -64,7 +65,6 @@ export const updateComicStatusSchema = z.object({
   }),
 });
 
-
 export const comicFilterQuerySchema = z.object({
   gender: z
     .enum(["BOY", "GIRL", "UNISEX"], {
@@ -73,10 +73,29 @@ export const comicFilterQuerySchema = z.object({
     .optional(), // Marks it as optional so /api/comics works without it
 });
 
+export const updateComicSchema = z
+  .object({
+    title: z.string().min(1).optional(),
+    genderTag: z.enum(["BOY", "GIRL", "UNISEX"]).optional(),
+    pageCount: z.number().int().positive().optional(),
+    freePreviewPages: z.number().int().positive().optional(),
+    loraStrength: z.number().min(0).max(2).optional(),
+    loraKey: z.string().min(1).optional(),
+  })
+  .refine((data) => Object.values(data).some((v) => v !== undefined), {
+    message: "At least one field must be provided to update",
+  });
+
+export const getLoraUploadUrlSchema = z.object({
+  fileName: z.string().min(1),
+});
+
 export type CreateComicInput = z.infer<typeof createComicSchema>;
 export type UpdateComicPricingInput = z.infer<typeof updateComicPricingSchema>;
 export type UpdateComicStatusInput = z.infer<typeof updateComicStatusSchema>;
 export type ComicFilterQueryInput = z.infer<typeof comicFilterQuerySchema>;
+export type UpdateComicInput = z.infer<typeof updateComicSchema>;
+export type GetLoraUploadUrlInput = z.infer<typeof getLoraUploadUrlSchema>;
 
 // export const updateComicSchema = createComicSchema.partial();
 // export type UpdateComicInput = z.infer<typeof updateComicSchema>;
