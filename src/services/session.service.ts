@@ -139,13 +139,26 @@ export async function validateSessionPhoto(sessionId: string, key: string) {
     );
   }
 
-  const validationResult = await runPhotoValidation(key);
+  const validationResult = await runPhotoValidation(sessionId, key);
+
+  if (validationResult.passed) {
+    const updatedSession = await prisma.orderSession.update({
+      where: { id: sessionId },
+      data: {
+        rawPhotoUrls: [key],
+        bestPhotoUrl: key,
+        status: "PHOTO_UPLOADED",
+        photoScoreJson: validationResult as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    return { session: updatedSession, validation: validationResult };
+  }
 
   const updatedSession = await prisma.orderSession.update({
     where: { id: sessionId },
     data: {
       rawPhotoUrls: [key],
-      status: "PHOTO_UPLOADED",
       photoScoreJson: validationResult as unknown as Prisma.InputJsonValue,
     },
   });

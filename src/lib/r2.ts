@@ -7,6 +7,7 @@ import {
 import { config } from "../config/env.js";
 import { logger } from "./logger.js";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import fs from "fs/promises";
 
 // This single S3 instace will bee able to deal with both the public and private bucketconfiguration
 export const r2Client = new S3Client({
@@ -165,3 +166,18 @@ export const deleteFile = async (
     "File successfully deleted from Cloudflare R2"
   );
 };
+
+
+
+export async function downloadFileToLocalPath(
+  bucket: string,
+  key: string,
+  localPath: string
+): Promise<void> {
+  const response = await r2Client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: key })
+  );
+
+  const bodyBytes = await response.Body!.transformToByteArray();
+  await fs.writeFile(localPath, bodyBytes);
+}
