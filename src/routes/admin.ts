@@ -41,6 +41,8 @@ import {
   getFontUploadUrlSchema,
   createFontSchema,
 } from "../validators/font.schema.js";
+import { createThemeSchema, updateThemeSchema } from "../validators/theme.schema.js";
+import { createThemeHandler, deleteThemeHandler, updateThemeHandler } from "../controllers/theme.controller.js";
 
 const router = Router();
 
@@ -126,5 +128,13 @@ router.post("/countries/upload-url", getFlagUploadUrlHandler); // to upload the 
 router.get("/countries", getAllCountriesHandler);
 router.post("/countries", createCountryHandler); // to post the new country
 router.put("/countries/:countryId", updateCountryHandler); // to update the existing country
+
+
+
+
+// theme routes : 
+router.post("/themes", validateBody(createThemeSchema), createThemeHandler);// create 
+router.patch("/themes/:themeId", validateBody(updateThemeSchema), updateThemeHandler); // update
+router.delete("/themes/:themeId", deleteThemeHandler); // delete
 
 export default router;

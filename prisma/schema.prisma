@@ -80,6 +80,13 @@ model Verification {
 // COMIC CATALOGUE
 // ============================================================
 
+enum AgeGroup {
+  AGE_0_2
+  AGE_3_5
+  AGE_6_8
+  AGE_9_12
+}
+
 enum GenderTag {
   BOY
   GIRL
@@ -91,6 +98,18 @@ enum ComicStatus {
   PUBLISHING // publish job in progress (async sync to ComfyUI)
   PUBLISHED
   UNPUBLISHED
+}
+
+model Theme {
+  id   String @id @default(uuid())
+  name String @unique
+
+  comics Comic[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("themes")
 }
 
 model Comic {
@@ -111,6 +130,13 @@ model Comic {
   pricingRules  PricingRule[]
   orderSessions OrderSession[]
 
+  isBestseller Boolean @default(false)
+
+  description String?   @db.Text
+  themeId     String?
+  theme       Theme?    @relation(fields: [themeId], references: [id])
+  ageGroup    AgeGroup?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -130,12 +156,12 @@ model Page {
   mirrorFace    Boolean @default(false) // should the face be flipped
   faceDirection String? // "front" | "three-quarter" | "side"
   isPreviewPage Boolean @default(false) // part of free preview (pages 1–10 typically)
-  pagePrompt String? @db.Text
+  pagePrompt    String? @db.Text
 
-  bubbles Bubble[]
+  bubbles     Bubble[]
   pageVersion PageVersion[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
   @@unique([comicId, pageNumber])
   @@map("pages")
@@ -189,7 +215,7 @@ model PricingRule {
 
   countryId String
   country   Country @relation(fields: [countryId], references: [id])
-  price       Decimal @db.Decimal(10, 2)
+  price     Decimal @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -390,13 +416,12 @@ model SystemConfig {
   @@map("system_config")
 }
 
-
 model Country {
   id           String  @id @default(uuid())
   code         String  @unique // ISO 3166-1 alpha-2, e.g. "IN", "US"
-  name         String             // e.g. "India", "United States"
-  currencyCode String             // ISO 4217, e.g. "INR", "USD"
-  flagUrl      String             // R2 public bucket path to the flag image
+  name         String // e.g. "India", "United States"
+  currencyCode String // ISO 4217, e.g. "INR", "USD"
+  flagUrl      String // R2 public bucket path to the flag image
   isActive     Boolean @default(true)
 
   pricingRules PricingRule[]
