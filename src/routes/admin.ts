@@ -45,6 +45,8 @@ import {
 } from "../validators/font.schema.js";
 import { createThemeSchema, updateThemeSchema } from "../validators/theme.schema.js";
 import { createThemeHandler, deleteThemeHandler, updateThemeHandler } from "../controllers/theme.controller.js";
+import { createAnnouncementSchema, reorderAnnouncementsSchema, updateAnnouncementSchema } from "../validators/announcement.schema.js";
+import { createAnnouncementHandler, deleteAnnouncementHandler, listAnnouncementsHandler, reorderAnnouncementsHandler, toggleAnnouncementStatusHandler, updateAnnouncementHandler } from "../controllers/announcement.controller.js";
 
 const router = Router();
 
@@ -89,5 +91,17 @@ router.post("/themes", validateBody(createThemeSchema), createThemeHandler);// c
 router.patch("/themes/:themeId", validateBody(updateThemeSchema), updateThemeHandler); // update
 router.delete("/themes/:themeId", deleteThemeHandler); // delete
 // get route is in public folder
+
+
+
+// announcement routes
+router.post('/announcements', validateBody(createAnnouncementSchema), createAnnouncementHandler);
+router.patch('/announcements/reorder', validateBody(reorderAnnouncementsSchema), reorderAnnouncementsHandler);
+router.patch('/announcements/:id', validateBody(updateAnnouncementSchema), updateAnnouncementHandler);
+router.get('/announcements', listAnnouncementsHandler);
+router.patch('/announcements/:id/status', toggleAnnouncementStatusHandler);
+router.delete('/announcements/:id', deleteAnnouncementHandler);
+
+
 
 export default router;

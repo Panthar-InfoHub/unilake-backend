@@ -426,3 +426,16 @@ model Country {
 
   pricingRules PricingRule[]
 }
+
+
+model AnnouncementBar {
+  id        String   @id @default(uuid())
+  message   String   @db.Text
+  isActive  Boolean  @default(false)
+  sortOrder Int      @default(0) // controls rotation order on the frontend
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("announcement_bars")
+}
