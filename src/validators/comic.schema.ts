@@ -41,6 +41,10 @@ export const createComicSchema = z
 
     loraKey: z.string().min(1).optional(),
     loraStrength: z.number().min(0).max(2).optional(),
+    description: z.string().min(1).optional(),
+    themeId: z.string().uuid("Invalid theme ID").optional(),
+    ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
+    isBestseller: z.boolean().optional(),
   })
   .refine((data) => data.freePreviewPages < data.pageCount, {
     message:
@@ -70,7 +74,10 @@ export const comicFilterQuerySchema = z.object({
     .enum(["BOY", "GIRL", "UNISEX"], {
       message: "Invalid gender filter. Must be BOY, GIRL, or UNISEX.",
     })
-    .optional(), // Marks it as optional so /api/comics works without it
+    .optional(),
+  ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
+  themeId: z.string().uuid("Invalid theme ID").optional(),
+  search: z.string().optional(), // Marks it as optional so /api/comics works without it
 });
 
 export const updateComicSchema = z
@@ -81,6 +88,10 @@ export const updateComicSchema = z
     freePreviewPages: z.number().int().positive().optional(),
     loraStrength: z.number().min(0).max(2).optional(),
     loraKey: z.string().min(1).optional(),
+    description: z.string().min(1).optional(),
+    themeId: z.string().uuid("Invalid theme ID").optional(),
+    ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
+    isBestseller: z.boolean().optional(),
   })
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided to update",
@@ -90,12 +101,20 @@ export const getLoraUploadUrlSchema = z.object({
   fileName: z.string().min(1),
 });
 
+export const adminComicFilterQuerySchema = z.object({
+  gender: z.enum(["BOY", "GIRL", "UNISEX"]).optional(),
+  ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
+  themeId: z.string().uuid("Invalid theme ID").optional(),
+  search: z.string().optional(),
+});
+
 export type CreateComicInput = z.infer<typeof createComicSchema>;
 export type UpdateComicPricingInput = z.infer<typeof updateComicPricingSchema>;
 export type UpdateComicStatusInput = z.infer<typeof updateComicStatusSchema>;
 export type ComicFilterQueryInput = z.infer<typeof comicFilterQuerySchema>;
 export type UpdateComicInput = z.infer<typeof updateComicSchema>;
 export type GetLoraUploadUrlInput = z.infer<typeof getLoraUploadUrlSchema>;
+export type AdminComicFilterQueryInput = z.infer<typeof adminComicFilterQuerySchema>;
 
 // export const updateComicSchema = createComicSchema.partial();
 // export type UpdateComicInput = z.infer<typeof updateComicSchema>;

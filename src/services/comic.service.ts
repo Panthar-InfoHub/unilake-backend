@@ -8,6 +8,8 @@ import {
   ValidationError,
 } from "../utils/errors.js";
 import type {
+  AdminComicFilterQueryInput,
+  ComicFilterQueryInput,
   CreateComicInput,
   GetLoraUploadUrlInput,
   UpdateComicPricingInput,
@@ -100,6 +102,10 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     if (data.freePreviewPages !== undefined) updateData.freePreviewPages = data.freePreviewPages;
     if (data.loraStrength !== undefined) updateData.loraStrength = data.loraStrength;
     if (data.loraKey !== undefined) updateData.loraFileUrl = data.loraKey;
+    if (data.description !== undefined) updateData.description = data.description;
+    if (data.themeId !== undefined) updateData.theme = { connect: { id: data.themeId } };
+    if (data.ageGroup !== undefined) updateData.ageGroup = data.ageGroup;
+    if (data.isBestseller !== undefined) updateData.isBestseller = data.isBestseller;
     // if (data.generationPrompt !== undefined)
     //   updateData.generationPrompt = data.generationPrompt;
     // if (data.generationNegativePrompt !== undefined)
@@ -121,6 +127,45 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     throw error;
   }
 };
+
+export async function deleteComic(comicId: string) {
+  const comic = await prisma.comic.findUnique({
+    where: { id: comicId },
+    include: {
+      _count: {
+        select: { orderSessions: true },
+      },
+    },
+  });
+
+  if (!comic) {
+    throw new NotFoundError("Comic not found.");
+  }
+
+  if (comic.status === "PUBLISHED") {
+    throw new ConflictError(
+      "Cannot delete a published comic. Unpublish it first."
+    );
+  }
+
+  // Check for active (non-terminal) order sessions
+  const activeSessionCount = await prisma.orderSession.count({
+    where: {
+      comicId,
+      status: {
+        notIn: ["COMPLETED", "FAILED"],
+      },
+    },
+  });
+
+  if (activeSessionCount > 0) {
+    throw new ConflictError(
+      `Cannot delete this comic — it has ${activeSessionCount} active order session(s). Wait for them to complete or fail first.`
+    );
+  }
+
+  await prisma.comic.delete({ where: { id: comicId } });
+}
 
 export const updateComicPricing = async (
   comicId: string,
@@ -260,19 +305,48 @@ export const updateComicStatus = async (
 };
 
 export const getPublicComicsList = async (
-  gender?: "BOY" | "GIRL" | "UNISEX"
+  filters: ComicFilterQueryInput
 ) => {
+  const where: Prisma.ComicWhereInput = {
+    status: "PUBLISHED",
+  };
+
+  if (filters.gender !== undefined) {
+    where.genderTag = filters.gender;
+  }
+
+  if (filters.ageGroup !== undefined) {
+    where.ageGroup = filters.ageGroup;
+  }
+
+  if (filters.themeId !== undefined) {
+    where.themeId = filters.themeId;
+  }
+
+  if (filters.search !== undefined && filters.search.trim() !== "") {
+    where.title = {
+      contains: filters.search.trim(),
+      mode: "insensitive",
+    };
+  }
+
   return await prisma.comic.findMany({
-    where: {
-      status: "PUBLISHED",
-      ...(gender && { genderTag: gender }),
-    },
+    where,
     select: {
       id: true,
       title: true,
+      description: true,
       genderTag: true,
+      ageGroup: true,
+      isBestseller: true,
       pageCount: true,
       coverThumbnailUrl: true,
+      theme: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
       pricingRules: {
         select: {
           price: true,
@@ -353,3 +427,52 @@ export const getLoraUploadUrl = async (input: GetLoraUploadUrlInput) => {
 
   return { uploadUrl, key };
 };
+
+
+export async function getAdminComicsList(filters: AdminComicFilterQueryInput) {
+  const where: Prisma.ComicWhereInput = {};
+
+  if (filters.gender !== undefined) {
+    where.genderTag = filters.gender;
+  }
+
+  if (filters.ageGroup !== undefined) {
+    where.ageGroup = filters.ageGroup;
+  }
+
+  if (filters.themeId !== undefined) {
+    where.themeId = filters.themeId;
+  }
+
+  if (filters.search !== undefined && filters.search.trim() !== "") {
+    where.title = {
+      contains: filters.search.trim(),
+      mode: "insensitive",
+    };
+  }
+
+  const comics = await prisma.comic.findMany({
+    where,
+    include: {
+      theme: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      _count: {
+        select: {
+          pages: true,
+          orderSessions: true,
+          pricingRules: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return comics;
+}
+
+
+

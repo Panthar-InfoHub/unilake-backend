@@ -9,12 +9,14 @@ import fs from "fs/promises";
 
 const execFileAsync = promisify(execFile);
 
+const isWindows = process.platform === "win32";
 const PYTHON_EXECUTABLE = path.join(
   process.cwd(),
   "venv",
-  "Scripts",
-  "python.exe"
+  isWindows ? "Scripts" : "bin",
+  isWindows ? "python.exe" : "python"
 );
+
 const VALIDATE_SCRIPT_PATH = path.join(
   process.cwd(),
   "src",

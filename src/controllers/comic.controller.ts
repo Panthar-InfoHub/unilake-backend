@@ -13,8 +13,10 @@ import {
   getPublicComicDetails,
   updateComic,
   getLoraUploadUrl,
+  deleteComic,
+  getAdminComicsList,
 } from "../services/comic.service.js";
-import { comicFilterQuerySchema, getLoraUploadUrlSchema } from "../validators/comic.schema.js";
+import { adminComicFilterQuerySchema, comicFilterQuerySchema, getLoraUploadUrlSchema } from "../validators/comic.schema.js";
 
 const uploadThumbnailRequestSchema = z.object({
   fileName: z.string().min(1, "File name is required"),
@@ -94,6 +96,19 @@ export const updateComicHandler = asyncHandler(
   }
 );
 
+export const deleteComicHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { comicId } = req.params;
+
+    if (!comicId || typeof comicId !== "string") {
+      throw new ValidationError("Comic ID is required.");
+    }
+
+    await deleteComic(comicId);
+    res.status(204).send();
+  }
+);
+
 export const updateComicPricingHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const { comicId } = req.params;
@@ -170,7 +185,7 @@ export const getPublicComicsHandler = asyncHandler(
     try {
       const validatedQuery = comicFilterQuerySchema.parse(req.query);
 
-      const comics = await getPublicComicsList(validatedQuery.gender);
+      const comics = await getPublicComicsList(validatedQuery);
 
       res.status(200).json({
         success: true,
@@ -209,5 +224,28 @@ export const getLoraUploadUrlHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const result = await getLoraUploadUrl(req.body);
     res.status(200).json(result);
+  }
+);
+
+
+export const getAdminComicsHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    try {
+      const validatedQuery = adminComicFilterQuerySchema.parse(req.query);
+      const comics = await getAdminComicsList(validatedQuery);
+
+      res.status(200).json({
+        success: true,
+        data: comics,
+      });
+    } catch (error: any) {
+      if (error instanceof ZodError) {
+        const errorMessages = error.issues
+          .map((issue: ZodIssue) => issue.message)
+          .join(", ");
+        throw new ValidationError(`Query error: ${errorMessages}`);
+      }
+      throw error;
+    }
   }
 );

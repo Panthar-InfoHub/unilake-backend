@@ -2,6 +2,8 @@
 import { Router } from "express";
 import {
   createComicHandler,
+  deleteComicHandler,
+  getAdminComicsHandler,
   getComicPricingHandler,
   getLoraUploadUrlHandler,
   getThumbnailUploadUrlHandler,
@@ -56,71 +58,21 @@ router.get("/status", (req, res) => {
 });
 
 // comic routes
+router.get("/comics", getAdminComicsHandler); // get the comic rotues 
+router.post("/comics/thumbnail/upload-url", getThumbnailUploadUrlHandler);// For uploading the thumbnail of the Comic
+router.post("/comics", validateBody(createComicSchema), createComicHandler);// create comic 
+router.delete("/comics/:comicId", deleteComicHandler);// delete comic
+router.patch( "/comics/:comicId", validateBody(updateComicSchema), updateComicHandler );// update comic
+router.get("/comics/:comicId/pricing", getComicPricingHandler); // Get comic pricing
+router.put( "/comics/:comicId/pricing", validateBody(updateComicPricingSchema), updateComicPricingHandler );// update comic pricing
+router.patch( "/comics/:comicId/status", validateBody(updateComicStatusSchema), updateComicStatusHandler ); // Publishing the status of comic
 
-
-// this one will give the upload url of the thumbnail
-router.post("/comics/thumbnail/upload-url", getThumbnailUploadUrlHandler);
-
-// this will update the details of the comic
-router.patch( "/comics/:comicId", validateBody(updateComicSchema), updateComicHandler );
-
-// this will create the comic
-router.post("/comics", validateBody(createComicSchema), createComicHandler);
-
-// this will get the pricing of the comic
-router.get("/comics/:comicId/pricing", getComicPricingHandler);
-
-// this will update the pricing of the coimc 
-router.put(
-  "/comics/:comicId/pricing",
-  validateBody(updateComicPricingSchema),
-  updateComicPricingHandler
-);
-
-// This is for updating the status of the coimc to publish or to anything
-router.patch(
-  "/comics/:comicId/status",
-  validateBody(updateComicStatusSchema),
-  updateComicStatusHandler
-);
-
-// This will give he URL to upload the pages of the comic
-router.post(
-  "/comics/:comicId/pages/upload-url",
-  validateBody(getPageArtworkUploadUrlSchema),
-  getPageArtworkUploadUrlHandler
-);
-
-
-// This route is for the uploading the lora file on to the private file each comic 
-router.post(
-  "/comics/lora/upload-url",
-  validateBody(getLoraUploadUrlSchema),
-  getLoraUploadUrlHandler
-)
-
-
-// this will map the bubble 
-router.post(
-  "/pages/:pageId/bubbles",
-  validateBody(createBubbleSchema),
-  createBubbleHandler
-);
-
-// this will give the upload url for the font
-router.post(
-  "/comics/:comicId/fonts/upload-url",
-  validateBody(getFontUploadUrlSchema),
-  getFontUploadUrlHandler
-);
-
-
-// this will uplload the fonts to the comic
-router.post(
-  "/comics/:comicId/fonts",
-  validateBody(createFontSchema),
-  createFontHandler
-);
+// PAGES 
+router.post( "/comics/:comicId/pages/upload-url", validateBody(getPageArtworkUploadUrlSchema), getPageArtworkUploadUrlHandler);// This will give the uplodation URL for the comic
+router.post( "/comics/lora/upload-url", validateBody(getLoraUploadUrlSchema), getLoraUploadUrlHandler)// This will give the Upload URL for the LORA file
+router.post( "/pages/:pageId/bubbles", validateBody(createBubbleSchema), createBubbleHandler); // This will map the bubble
+router.post( "/comics/:comicId/fonts/upload-url", validateBody(getFontUploadUrlSchema), getFontUploadUrlHandler);// this will give the upload URL for the Font
+router.post( "/comics/:comicId/fonts", validateBody(createFontSchema), createFontHandler); // this will upload the fonts to the comic
 
 
 // country routes
@@ -136,5 +88,6 @@ router.put("/countries/:countryId", updateCountryHandler); // to update the exis
 router.post("/themes", validateBody(createThemeSchema), createThemeHandler);// create 
 router.patch("/themes/:themeId", validateBody(updateThemeSchema), updateThemeHandler); // update
 router.delete("/themes/:themeId", deleteThemeHandler); // delete
+// get route is in public folder
 
 export default router;
