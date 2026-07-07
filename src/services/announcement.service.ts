@@ -122,3 +122,11 @@ export async function deleteAnnouncement(id: string) {
   logger.info({ announcementId: id }, 'Announcement deleted');
 }
 
+export async function getActiveAnnouncements() {
+  const announcements = await prisma.announcementBar.findMany({
+    where: { isActive: true },
+    orderBy: { sortOrder: "asc" },
+  });
+
+  return announcements;
+}

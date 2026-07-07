@@ -47,6 +47,11 @@ import { createThemeSchema, updateThemeSchema } from "../validators/theme.schema
 import { createThemeHandler, deleteThemeHandler, updateThemeHandler } from "../controllers/theme.controller.js";
 import { createAnnouncementSchema, reorderAnnouncementsSchema, updateAnnouncementSchema } from "../validators/announcement.schema.js";
 import { createAnnouncementHandler, deleteAnnouncementHandler, listAnnouncementsHandler, reorderAnnouncementsHandler, toggleAnnouncementStatusHandler, updateAnnouncementHandler } from "../controllers/announcement.controller.js";
+import { createHeroImageSchema, getHeroImageUploadUrlSchema } from "../validators/heroImage.schema.js";
+import { createHeroImageHandler, deleteHeroImageHandler, getAllHeroImagesHandler, getHeroImageUploadUrlHandler, toggleHeroImageStatusHandler } from "../controllers/heroImage.controller.js";
+import { createCustomerReviewSchema, getCustomerReviewUploadUrlSchema } from "../validators/customerReview.schema.js";
+import { createCustomerReviewHandler, deleteCustomerReviewHandler, getAllCustomerReviewsHandler, getCustomerReviewUploadUrlHandler, toggleCustomerReviewStatusHandler } from "../controllers/customerReview.controller.js";
+
 
 const router = Router();
 
@@ -101,6 +106,24 @@ router.patch('/announcements/:id', validateBody(updateAnnouncementSchema), updat
 router.get('/announcements', listAnnouncementsHandler);
 router.patch('/announcements/:id/status', toggleAnnouncementStatusHandler);
 router.delete('/announcements/:id', deleteAnnouncementHandler);
+
+
+
+// hero images routes 
+router.post("/hero-images/upload-url", validateBody(getHeroImageUploadUrlSchema), getHeroImageUploadUrlHandler)
+router.post("/hero-images", validateBody(createHeroImageSchema), createHeroImageHandler);
+router.patch("/hero-images/:id/status", toggleHeroImageStatusHandler);
+router.get("/hero-images", getAllHeroImagesHandler);
+router.delete("/hero-images/:id", deleteHeroImageHandler);
+
+
+// customer Reviews
+router.post("/customer-reviews/upload-url", validateBody(getCustomerReviewUploadUrlSchema), getCustomerReviewUploadUrlHandler);
+router.post("/customer-reviews", validateBody(createCustomerReviewSchema), createCustomerReviewHandler);
+router.patch("/customer-reviews/:id/status", toggleCustomerReviewStatusHandler);
+router.delete("/customer-reviews/:id", deleteCustomerReviewHandler);
+router.get("/customer-reviews", getAllCustomerReviewsHandler);
+
 
 
 

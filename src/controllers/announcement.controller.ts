@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import { createAnnouncement, deleteAnnouncement, listAnnouncements, reorderAnnouncements, toggleAnnouncementStatus, updateAnnouncement } from '../services/announcement.service.js';
+import { createAnnouncement, deleteAnnouncement, getActiveAnnouncements, listAnnouncements, reorderAnnouncements, toggleAnnouncementStatus, updateAnnouncement } from '../services/announcement.service.js';
 
 export const createAnnouncementHandler = asyncHandler(async (req: Request, res: Response) => {
   const announcement = await createAnnouncement(req.body);
@@ -37,3 +37,10 @@ export const deleteAnnouncementHandler = asyncHandler(async (req: Request, res: 
   await deleteAnnouncement(id as string);
   res.status(204).send();
 });
+
+export const getActiveAnnouncementsHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const announcements = await getActiveAnnouncements();
+    res.json(announcements);
+  }
+);

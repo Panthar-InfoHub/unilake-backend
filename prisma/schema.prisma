@@ -439,3 +439,26 @@ model AnnouncementBar {
 
   @@map("announcement_bars")
 }
+
+model HeroImage {
+  id        String   @id @default(uuid())
+  imageUrl  String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("hero_images")
+}
+
+
+model CustomerReview {
+  id           String   @id @default(uuid())
+  customerName String
+  description  String   @db.Text
+  videoUrl     String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("customer_reviews")
+}

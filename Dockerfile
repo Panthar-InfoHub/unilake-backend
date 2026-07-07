@@ -59,7 +59,7 @@ RUN npx prisma generate
 # ----- Port -----
 # Tells Docker (and hosting platforms) which port the app listens on.
 # This doesn't actually open the port — it's documentation for the platform.
-EXPOSE 3000
+EXPOSE 8080
 
 # ----- Start the app -----
 # This runs when the container starts.

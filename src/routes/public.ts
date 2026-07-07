@@ -7,6 +7,9 @@ import { validateBody } from "../middlewares/validateBody.js";
 import { createSessionSchema, photoUploadUrlSchema, photoValidateSchema, updateSessionSchema   } from "../validators/session.schema.js";
 import { createPhotoUploadUrlHandler, createSessionHandler,getSessionHandler, updateSessionHandler, validateSessionPhotoHandler, generateSessionHandler, regeneratePageHandler  } from "../controllers/session.controller.js";
 import { getAllThemesHandler } from "../controllers/theme.controller.js";
+import { getActiveHeroImagesHandler } from "../controllers/heroImage.controller.js";
+import { getActiveCustomerReviewsHandler } from "../controllers/customerReview.controller.js";
+import { getActiveAnnouncementsHandler } from "../controllers/announcement.controller.js";
 const router = Router();
 
 // This will give the public comic
@@ -27,5 +30,15 @@ router.post("/sessions/:sessionId/pages/:pageNumber/regenerate", regeneratePageH
 // theme endpoint : 
 
 router.get("/themes", getAllThemesHandler);
+
+// announcement : 
+router.get("/announcements", getActiveAnnouncementsHandler);
+
+// hero-image
+router.get("/hero-images", getActiveHeroImagesHandler);
+
+
+// customer reviews get endpoint : 
+router.get("/customer-reviews", getActiveCustomerReviewsHandler);
 
 export default router;
