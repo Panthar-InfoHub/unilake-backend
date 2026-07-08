@@ -51,6 +51,10 @@ import { createHeroImageSchema, getHeroImageUploadUrlSchema } from "../validator
 import { createHeroImageHandler, deleteHeroImageHandler, getAllHeroImagesHandler, getHeroImageUploadUrlHandler, toggleHeroImageStatusHandler } from "../controllers/heroImage.controller.js";
 import { createCustomerReviewSchema, getCustomerReviewUploadUrlSchema } from "../validators/customerReview.schema.js";
 import { createCustomerReviewHandler, deleteCustomerReviewHandler, getAllCustomerReviewsHandler, getCustomerReviewUploadUrlHandler, toggleCustomerReviewStatusHandler } from "../controllers/customerReview.controller.js";
+import { createTeamMemberSchema, getTeamMemberUploadUrlSchema, updateTeamMemberSchema } from "../validators/teamMember.schema.js";
+import { createTeamMemberHandler, deleteTeamMemberHandler, getActiveTeamMembersHandler, getAllTeamMembersHandler, getTeamMemberUploadUrlHandler, toggleTeamMemberStatusHandler, updateTeamMemberHandler } from "../controllers/teamMember.controller.js";
+import { deleteFeedbackHandler, getAllFeedbacksHandler, updateFeedbackStatusHandler } from "../controllers/feedback.controller.js";
+import { updateFeedbackStatusSchema } from "../validators/feedback.schema.js";
 
 
 const router = Router();
@@ -125,6 +129,22 @@ router.delete("/customer-reviews/:id", deleteCustomerReviewHandler);
 router.get("/customer-reviews", getAllCustomerReviewsHandler);
 
 
+
+// team member's 
+router.post("/team-members/upload-url", validateBody(getTeamMemberUploadUrlSchema), getTeamMemberUploadUrlHandler);
+router.post("/team-members", validateBody(createTeamMemberSchema), createTeamMemberHandler);
+router.patch("/team-members/:id", validateBody(updateTeamMemberSchema), updateTeamMemberHandler);
+router.patch("/team-members/:id/status", toggleTeamMemberStatusHandler);
+router.delete("/team-members/:id", deleteTeamMemberHandler);
+router.get("/team-members", getAllTeamMembersHandler);
+router.get("/team-members", getActiveTeamMembersHandler);
+
+
+
+// feedback
+router.get("/feedbacks", getAllFeedbacksHandler);
+router.patch("/feedbacks/:id/status", validateBody(updateFeedbackStatusSchema), updateFeedbackStatusHandler);
+router.delete("/feedbacks/:id", deleteFeedbackHandler);
 
 
 export default router;
