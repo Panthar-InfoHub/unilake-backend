@@ -12,6 +12,7 @@ import { getActiveCustomerReviewsHandler } from "../controllers/customerReview.c
 import { getActiveAnnouncementsHandler } from "../controllers/announcement.controller.js";
 import { createFeedbackHandler } from "../controllers/feedback.controller.js";
 import { createFeedbackSchema } from "../validators/feedback.schema.js";
+import { getActiveTeamMembersHandler } from "../controllers/teamMember.controller.js";
 const router = Router();
 
 // This will give the public comic
@@ -42,6 +43,10 @@ router.get("/hero-images", getActiveHeroImagesHandler);
 
 // customer reviews get endpoint : 
 router.get("/customer-reviews", getActiveCustomerReviewsHandler);
+
+
+// team meber 
+router.get("/team-members", getActiveTeamMembersHandler);
 
 
 

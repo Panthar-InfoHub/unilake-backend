@@ -1,27 +1,17 @@
-# ----- Base image -----
-# Node 22 on Debian Bookworm. We pick the full image (not alpine)
-# because OpenCV and MediaPipe need system-level C libraries
-# that don't exist on Alpine without painful manual compilation.
-FROM node:22-bookworm
+# ============================================================
+# Stage 1: Builder
+# ============================================================
+# This stage installs everything we need to build the app —
+# node_modules (including devDependencies like tsx and prisma CLI)
+# and the generated Prisma client. We do all the "install stuff"
+# work here so we can throw it away in the next stage and only
+# keep what's needed to actually RUN the app. Result: smaller
+# final image, faster deploys, faster cold starts on Cloud Run.
+# ============================================================
+FROM node:22-bookworm-slim AS builder
 
-# ----- System dependencies -----
-# These are Linux packages that Python libraries need:
-# - python3, python3-venv, pip: to run your photo validation script
-# - libgl1, libglib2.0-0: OpenCV needs these to work on Linux
-#   (on Windows these come built-in, on Linux they must be installed manually)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-venv \
-    python3-pip \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-# ----- Working directory -----
-# Everything from here on happens inside /app
 WORKDIR /app
 
-# ----- Node dependencies -----
 # Copy package files first, install, THEN copy source code.
 # Why this order? Docker caches each step. If your source code changes
 # but package.json didn't, Docker reuses the cached node_modules
@@ -29,38 +19,52 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# ----- Python virtual environment -----
-# Copy requirements.txt first (same caching trick as above).
-# python3 -m venv creates a virtual environment at /app/venv.
-# On Linux, the python binary lives at venv/bin/python (not venv/Scripts/python.exe).
-# Our code already handles this via the isWindows check we just added.
-COPY requirements.txt ./
-RUN python3 -m venv venv && \
-    venv/bin/pip install --no-cache-dir -r requirements.txt
+# Copy the rest of the source (src, prisma schema, config files, etc.)
+COPY . .
+
+# Generate the Prisma client.
+# prisma.config.ts reads DIRECT_URL from process.env directly (you already
+# decoupled it from env.ts for this exact reason). But Prisma still requires
+# the env var to *exist* during generation — it doesn't actually connect.
+# We pass a placeholder so the build works without any real secrets baked in.
+RUN DIRECT_URL="postgresql://placeholder" npx prisma generate
 
 
-# ----- Copy the rest of your source code -----
-COPY src ./src
+# ============================================================
+# Stage 2: Runtime
+# ============================================================
+# Fresh, minimal image. We copy over only what the running app
+# needs — node_modules, source, prisma schema, package.json.
+# Everything else (build tools, caches, docs) gets left behind.
+# ============================================================
+FROM node:22-bookworm-slim AS runtime
 
+WORKDIR /app
 
-# ----- Prisma setup -----
-# Prisma needs the schema file and config to generate its client.
-# We copy just these first, generate the client, then copy everything else.
-COPY prisma ./prisma
-COPY prisma.config.ts ./
-RUN npx prisma generate
+# Copy production artifacts from the builder stage.
+# node_modules already includes the generated Prisma client
+# because `npx prisma generate` writes into node_modules.
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/src ./src
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/package-lock.json ./package-lock.json
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
-
-# ----- Download MediaPipe model -----
-# Your Python script expects this file at src/scripts/models/
-# It's already in your source code, so COPY src above handles it.
-# If it's ever missing, this is where you'd add a RUN wget/curl command.
+# ----- Runtime env -----
+# NODE_ENV=production tells Express and other libraries to skip
+# dev-only work (verbose error pages, extra logging, etc.).
+ENV NODE_ENV=production
 
 # ----- Port -----
-# Tells Docker (and hosting platforms) which port the app listens on.
-# This doesn't actually open the port — it's documentation for the platform.
+# Cloud Run injects a PORT env variable (usually 8080) and expects
+# your app to listen on it. Your env.ts should already be reading
+# process.env.PORT. EXPOSE is documentation-only — doesn't actually
+# open the port — but keeps things clear.
 EXPOSE 8080
 
 # ----- Start the app -----
-# This runs when the container starts.
+# Same as before: runs `tsx src/server.ts` under the hood via your
+# "start" script in package.json.
 CMD ["npm", "start"]
