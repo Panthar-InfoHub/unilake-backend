@@ -22,6 +22,8 @@ model User {
   updatedAt     DateTime  @updatedAt
   sessions      Session[]
   accounts      Account[]
+  orderSessions OrderSession[]
+  savedAddresses SavedAddress[]
   role          String    @default("USER")
 
   @@unique([email])
@@ -87,6 +89,10 @@ enum AgeGroup {
   AGE_9_12
 }
 
+enum CoverType {
+  HARDCOVER
+  SOFTCOVER
+}
 enum GenderTag {
   BOY
   GIRL
@@ -215,12 +221,13 @@ model PricingRule {
 
   countryId String
   country   Country @relation(fields: [countryId], references: [id])
+  coverType CoverType
   price     Decimal @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([comicId, countryId])
+  @@unique([comicId, countryId, coverType])
   @@map("pricing_rules")
 }
 
@@ -260,8 +267,13 @@ model OrderSession {
   comicId String
   comic   Comic  @relation(fields: [comicId], references: [id])
 
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
   childName  String?
   pronounKey PronounKey?
+  notificationEmail String?
+  coverType         CoverType?
   age        Int?
   status     OrderSessionStatus @default(CREATED)
 
@@ -362,6 +374,20 @@ model Order {
   amount      Decimal @db.Decimal(10, 2)
   currency    String
   countryCode String // snapshot of country used for pricing lookup at order time
+  coverType   CoverType 
+
+  notificationEmail String? 
+
+
+  // Shipping address snapshot — copied from OrderSession at order creation, never changes
+  shippingName    String?
+  shippingLine1   String?
+  shippingLine2   String?
+  shippingCity    String?
+  shippingState   String?
+  shippingZip     String?
+  shippingCountry String? // ISO alpha-2
+  shippingPhone   String?
 
   razorpayOrderId   String?     @unique
   razorpayPaymentId String?     @unique
@@ -386,6 +412,30 @@ model Order {
   webhookEvents WebhookEvent[]
 
   @@map("orders")
+}
+
+
+model SavedAddress {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  label   String? // optional friendly name, e.g. "Home", "Office"
+  name    String // recipient full name
+  line1   String // address line 1
+  line2   String? // address line 2 (optional)
+  city    String
+  state   String
+  zip     String
+  country String // ISO alpha-2, e.g. "IN", "US"
+  phone   String
+
+  isDefault Boolean @default(false) // only one per user can be true
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("saved_addresses")
 }
 
 // Idempotency tracking for Razorpay + Shiprocket webhooks
@@ -427,12 +477,11 @@ model Country {
   pricingRules PricingRule[]
 }
 
-
 model AnnouncementBar {
-  id        String   @id @default(uuid())
-  message   String   @db.Text
-  isActive  Boolean  @default(false)
-  sortOrder Int      @default(0) // controls rotation order on the frontend
+  id        String  @id @default(uuid())
+  message   String  @db.Text
+  isActive  Boolean @default(false)
+  sortOrder Int     @default(0) // controls rotation order on the frontend
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -449,7 +498,6 @@ model HeroImage {
 
   @@map("hero_images")
 }
-
 
 model CustomerReview {
   id           String   @id @default(uuid())
@@ -478,7 +526,6 @@ model TeamMember {
 
   @@map("team_members")
 }
-
 
 enum FeedbackStatus {
   OPEN

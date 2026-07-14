@@ -18,6 +18,7 @@ const requriedVariables = [
   "FACEBOOK_CLIENT_SECRET",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
+  "BETTER_AUTH_URL",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -36,6 +37,7 @@ export const config = {
   DIRECT_URL: process.env.DIRECT_URL,
   googleId : process.env.GOOGLE_CLIENT_ID as string,
   googleSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+  betterAuthUrl: process.env.BETTER_AUTH_URL as string,
   facebookId: process.env.FACEBOOK_CLIENT_ID as string,
   facebookSecret: process.env.FACEBOOK_CLIENT_SECRET as string,
   r2: {
