@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { createOrderSession, createPhotoUploadUrl, getOrderSessionId, updateOrderSession, validateSessionPhoto, triggerGeneration, regeneratePage } from "../services/session.service.js";
+import { createOrderSession, createPhotoUploadUrl, getOrderSessionId, updateOrderSession, validateSessionPhoto, triggerGeneration, regeneratePage, attachUserToSession } from "../services/session.service.js";
 import { regeneratePageParamsSchema } from "../validators/regenerate.schema.js";
 import { ValidationError } from "../utils/errors.js";
 import { generateSessionParamsSchema } from "../validators/generate.schema.js";
@@ -82,4 +82,17 @@ export const regeneratePageHandler = asyncHandler(async (req, res) => {
   const result = await regeneratePage(sessionId, pageNumber);
 
   res.status(200).json(result);
+});
+
+export const attachUserHandler = asyncHandler(async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  if (!sessionId || typeof sessionId !== 'string') {
+    throw new ValidationError('sessionId param is required');
+  }
+
+  const userId = req.user!.id;
+
+  const session = await attachUserToSession(sessionId, userId);
+
+  res.status(200).json(session);
 });

@@ -317,3 +317,28 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
     stage: isHdStage ? "HD" : "SD",
   };
 }
+
+export async function attachUserToSession(sessionId: string, userId: string)  {
+
+  const session = await prisma.orderSession.findUnique({
+    where : {id : sessionId},
+  })
+
+  if(!session){
+    throw new NotFoundError("OrderSession not found");
+  }
+
+  if (session.userId === userId) {
+    return session;
+  }
+
+  if (session.userId !== null) {
+    throw new ConflictError("Session already belongs to another user");
+  }
+
+  return prisma.orderSession.update({
+    where: { id: sessionId },
+    data: { userId },
+  });
+}
+
