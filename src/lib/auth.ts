@@ -32,7 +32,15 @@ export const auth = betterAuth({
       }
     }
   },
+  advanced : {
+    defaultCookieAttributes: {
+      sameSite: "none",
+      secure: true,
+      httpOnly: true,
+    },
+  },
   trustedOrigins: [
     'http://localhost:3000', // your frontend dev URL — adjust to your actual frontend port
+    'https://unilake-backend-590672762351.asia-south1.run.app',
   ],
 })
