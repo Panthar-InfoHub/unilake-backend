@@ -15,6 +15,7 @@ import {
   getLoraUploadUrl,
   deleteComic,
   getAdminComicsList,
+  getAdminComicDetail
 } from "../services/comic.service.js";
 import { adminComicFilterQuerySchema, comicFilterQuerySchema, getLoraUploadUrlSchema } from "../validators/comic.schema.js";
 
@@ -247,5 +248,22 @@ export const getAdminComicsHandler = asyncHandler(
       }
       throw error;
     }
+  }
+);
+
+export const getAdminComicDetailHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { comicId } = req.params;
+
+    if (!comicId || typeof comicId !== "string") {
+      throw new ValidationError("Comic ID is required.");
+    }
+
+    const comic = await getAdminComicDetail(comicId);
+
+    res.status(200).json({
+      success: true,
+      data: comic,
+    });
   }
 );

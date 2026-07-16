@@ -42,5 +42,6 @@ export const auth = betterAuth({
   trustedOrigins: [
     'http://localhost:3000', // your frontend dev URL — adjust to your actual frontend port
     'https://unilake-backend-590672762351.asia-south1.run.app',
+    'https://unilake-backend.onrender.com'
   ],
 })

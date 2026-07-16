@@ -62,6 +62,7 @@ export const createComic = async (data: CreateComicInput) => {
         data: pricing.map((p) => ({
           comicId: comic.id,
           countryId: p.countryId,
+          coverType: p.coverType,
           price: p.price,
         })),
       });
@@ -194,6 +195,7 @@ export const updateComicPricing = async (
         data: data.pricing.map((p) => ({
           comicId,
           countryId: p.countryId,
+          coverType: p.coverType,
           price: p.price,
         })),
       });
@@ -350,6 +352,7 @@ export const getPublicComicsList = async (
       pricingRules: {
         select: {
           price: true,
+          coverType: true,
           country: {
             select: {
               code: true,
@@ -374,12 +377,22 @@ export const getPublicComicDetails = async (comicId: string) => {
     select: {
       id: true,
       title: true,
+      description: true,
       genderTag: true,
+      ageGroup: true,
+      isBestseller: true,
       pageCount: true,
       freePreviewPages: true,
       coverThumbnailUrl: true,
+      theme: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
       pricingRules: {
         select: {
+          coverType: true,
           price: true,
           country: {
             select: {
@@ -474,5 +487,60 @@ export async function getAdminComicsList(filters: AdminComicFilterQueryInput) {
   return comics;
 }
 
+
+
+export const getAdminComicDetail = async (comicId: string) => {
+  const comic = await prisma.comic.findUnique({
+    where: { id: comicId },
+    include: {
+      theme: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      pages: {
+        orderBy: { pageNumber: "asc" },
+        include: {
+          bubbles: {
+            orderBy: { sortOrder: "asc" },
+          },
+        },
+      },
+      fonts: true,
+      pricingRules: {
+        include: {
+          country: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              currencyCode: true,
+              flagUrl: true,
+            },
+          },
+        },
+        orderBy: {
+          country: {
+            name: "asc",
+          },
+        },
+      },
+      _count: {
+        select: {
+          orderSessions: true,
+        },
+      },
+    },
+  });
+
+  if (!comic) {
+    throw new NotFoundError("Comic not found.");
+  }
+
+  logger.info({ comicId }, "Admin fetched comic detail");
+
+  return comic;
+};
 
 

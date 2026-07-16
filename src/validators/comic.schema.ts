@@ -32,6 +32,9 @@ export const createComicSchema = z
           countryId: z
             .string()
             .uuid("Invalid country ID format. Must be a valid UUID."),
+          coverType: z.enum(["HARDCOVER", "SOFTCOVER"], {
+            message: "Cover type must be HARDCOVER or SOFTCOVER.",
+          }),
           price: z
             .number()
             .positive("Price must be a positive number greater than 0."),
@@ -57,6 +60,9 @@ export const updateComicPricingSchema = z.object({
     .array(
       z.object({
         countryId: z.string().uuid("Invalid country ID format."),
+        coverType: z.enum(["HARDCOVER", "SOFTCOVER"], {
+          message: "Cover type must be HARDCOVER or SOFTCOVER.",
+        }),
         price: z.number().positive("Price must be positive."),
       })
     )

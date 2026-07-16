@@ -8,6 +8,7 @@ import {
   createCountry,
   updateCountry,
   getAllCountries,
+  deleteCountry
 } from "../services/country.service.js";
 import {
   createCountrySchema,
@@ -137,3 +138,18 @@ export const getAllCountriesHandler = asyncHandler(async (req: Request, res : Re
         data: countries
     })
 }) 
+
+
+export const deleteCountryHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { countryId } = req.params;
+
+    if (!countryId || typeof countryId !== "string") {
+      throw new ValidationError("Country ID is required.");
+    }
+
+    await deleteCountry(countryId);
+
+    res.status(204).send();
+  }
+);

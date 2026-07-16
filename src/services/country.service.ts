@@ -118,3 +118,27 @@ export const getAllCountries = async () => {
     throw error;
   }
 };
+
+export const deleteCountry = async (countryId: string) => {
+  const country = await prisma.country.findUnique({
+    where: { id: countryId },
+  });
+
+  if (!country) {
+    throw new NotFoundError("Country not found.");
+  }
+
+  const pricingRuleCount = await prisma.pricingRule.count({
+    where: { countryId },
+  });
+
+  if (pricingRuleCount > 0) {
+    throw new ConflictError(
+      `Cannot delete country "${country.name}" — ${pricingRuleCount} pricing rule(s) reference it. Remove the pricing rules first.`
+    );
+  }
+
+  await prisma.country.delete({ where: { id: countryId } });
+
+  logger.info({ countryId, countryCode: country.code }, "Country deleted");
+};

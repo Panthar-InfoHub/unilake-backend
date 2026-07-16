@@ -4,6 +4,7 @@ import {
   createComicHandler,
   deleteComicHandler,
   getAdminComicsHandler,
+  getAdminComicDetailHandler,
   getComicPricingHandler,
   getLoraUploadUrlHandler,
   getThumbnailUploadUrlHandler,
@@ -13,6 +14,7 @@ import {
 } from "../controllers/comic.controller.js";
 import {
   createCountryHandler,
+  deleteCountryHandler,
   getAllCountriesHandler,
   getFlagUploadUrlHandler,
   updateCountryHandler,
@@ -69,7 +71,8 @@ router.get("/status", (req, res) => {
 });
 
 // comic routes
-router.get("/comics", getAdminComicsHandler); // get the comic rotues 
+router.get("/comics", getAdminComicsHandler); // get the comic rotues
+router.get("/comics/:comicId", getAdminComicDetailHandler); // single comic full detail 
 router.post("/comics/thumbnail/upload-url", getThumbnailUploadUrlHandler);// For uploading the thumbnail of the Comic
 router.post("/comics", validateBody(createComicSchema), createComicHandler);// create comic 
 router.delete("/comics/:comicId", deleteComicHandler);// delete comic
@@ -91,6 +94,7 @@ router.post("/countries/upload-url", getFlagUploadUrlHandler); // to upload the 
 router.get("/countries", getAllCountriesHandler);
 router.post("/countries", createCountryHandler); // to post the new country
 router.put("/countries/:countryId", updateCountryHandler); // to update the existing country
+router.delete("/countries/:countryId", deleteCountryHandler); // delete country (blocks if pricing rules reference it)
 
 
 

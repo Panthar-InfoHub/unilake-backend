@@ -22,7 +22,7 @@ import {
   MAX_HD_VARIANTS_PER_PAGE,
 } from "../config/generation.js";
 
-export async function createOrderSession(input: CreateSessionInput) {
+export async function createOrderSession(input: CreateSessionInput, userId?: string) {
   const comic = await prisma.comic.findUnique({ where: { id: input.comicId } });
 
   if (!comic || comic.status !== "PUBLISHED") {
@@ -34,6 +34,7 @@ export async function createOrderSession(input: CreateSessionInput) {
   return prisma.orderSession.create({
     data: {
       comicId: input.comicId,
+      userId: userId ?? null,
       expiresAt,
     },
   });
@@ -55,6 +56,16 @@ export async function updateOrderSession(
   if (input.childName !== undefined) data.childName = input.childName;
   if (input.age !== undefined) data.age = input.age;
   if (input.pronounKey !== undefined) data.pronounKey = input.pronounKey;
+  if (input.notificationEmail !== undefined) data.notificationEmail = input.notificationEmail;
+  if (input.coverType !== undefined) data.coverType = input.coverType;
+  if (input.shippingName !== undefined) data.shippingName = input.shippingName;
+  if (input.shippingLine1 !== undefined) data.shippingLine1 = input.shippingLine1;
+  if (input.shippingLine2 !== undefined) data.shippingLine2 = input.shippingLine2;
+  if (input.shippingCity !== undefined) data.shippingCity = input.shippingCity;
+  if (input.shippingState !== undefined) data.shippingState = input.shippingState;
+  if (input.shippingZip !== undefined) data.shippingZip = input.shippingZip;
+  if (input.shippingCountry !== undefined) data.shippingCountry = input.shippingCountry;
+  if (input.shippingPhone !== undefined) data.shippingPhone = input.shippingPhone;
 
   return prisma.orderSession.update({
     where: { id: sessionId },
@@ -67,7 +78,7 @@ export const getOrderSessionId = async (sessionId: string) => {
     where: { id: sessionId },
     include: {
       pageVersions: {
-        orderBy: [{ pageNumber: "asc" }, { variantIndex: "asc" }],
+        orderBy: [{ variantIndex: "asc" }],// 
       },
     },
   });
