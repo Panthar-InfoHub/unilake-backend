@@ -30,10 +30,14 @@ import {
 import {
   createPageSchema,
   getPageArtworkUploadUrlSchema,
+  updatePageSchema
 } from "../validators/page.schema.js";
 import {
   createPageHandler,
   getPageArtworkUploadUrlHandler,
+  listComicPagesHandler,
+  updatePageHandler,
+  deletePageHandler,
 } from "../controllers/page.controller.js";
 import { createBubbleSchema } from "../validators/bubble.schema.js";
 import { createBubbleHandler } from "../controllers/bubble.controller.js";
@@ -81,12 +85,22 @@ router.get("/comics/:comicId/pricing", getComicPricingHandler); // Get comic pri
 router.put( "/comics/:comicId/pricing", validateBody(updateComicPricingSchema), updateComicPricingHandler );// update comic pricing
 router.patch( "/comics/:comicId/status", validateBody(updateComicStatusSchema), updateComicStatusHandler ); // Publishing the status of comic
 
-// PAGES 
-router.post( "/comics/:comicId/pages/upload-url", validateBody(getPageArtworkUploadUrlSchema), getPageArtworkUploadUrlHandler);// This will give the uplodation URL for the comic
-router.post( "/comics/lora/upload-url", validateBody(getLoraUploadUrlSchema), getLoraUploadUrlHandler)// This will give the Upload URL for the LORA file
-router.post( "/pages/:pageId/bubbles", validateBody(createBubbleSchema), createBubbleHandler); // This will map the bubble
-router.post( "/comics/:comicId/fonts/upload-url", validateBody(getFontUploadUrlSchema), getFontUploadUrlHandler);// this will give the upload URL for the Font
-router.post( "/comics/:comicId/fonts", validateBody(createFontSchema), createFontHandler); // this will upload the fonts to the comic
+// PAGES
+router.get("/comics/:comicId/pages", listComicPagesHandler); // list all pages for a comic with nested bubbles
+router.post("/comics/:comicId/pages", validateBody(createPageSchema), createPageHandler); // create a new page
+router.post("/comics/:comicId/pages/upload-url", validateBody(getPageArtworkUploadUrlSchema), getPageArtworkUploadUrlHandler); // presigned upload URL for artwork/mask
+router.patch("/pages/:pageId", validateBody(updatePageSchema), updatePageHandler); // update page config
+router.delete("/pages/:pageId", deletePageHandler); // delete page (cascades bubbles)
+
+// BUBBLES
+router.post("/pages/:pageId/bubbles", validateBody(createBubbleSchema), createBubbleHandler); // create a bubble on a page
+
+// FONTS
+router.post("/comics/:comicId/fonts/upload-url", validateBody(getFontUploadUrlSchema), getFontUploadUrlHandler); // presigned upload URL for font file
+router.post("/comics/:comicId/fonts", validateBody(createFontSchema), createFontHandler); // create a font for a comic
+
+// LORA
+router.post("/comics/lora/upload-url", validateBody(getLoraUploadUrlSchema), getLoraUploadUrlHandler); // presigned upload URL for LoRA file
 
 
 // country routes
