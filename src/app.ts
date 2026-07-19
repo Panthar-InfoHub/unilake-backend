@@ -9,6 +9,8 @@ import { auth } from "./lib/auth.js";
 import { requireAdmin } from "./middlewares/requireAdmin.js";
 import adminRoutes from "./routes/admin.js";
 import publicRouter from "./routes/public.js";
+import userRouter from "./routes/user.js";
+import { requireLoggedIn } from "./middlewares/requireLoggedIn.js";
 
 
 const app = express();
@@ -22,7 +24,7 @@ app.use(
 app.use(
   cors({
     origin: "http://localhost:3000",
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   })
 );
@@ -34,6 +36,7 @@ app.get("/health", (req, res) => {
   res.send("Logger is working!");
 });
 app.use("/api/admin", requireAdmin, adminRoutes);
+app.use("/api/user", requireLoggedIn, userRouter);
 app.use("/api/public", publicRouter);
 
 app.use(errorHandler);
