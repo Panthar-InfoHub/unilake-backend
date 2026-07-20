@@ -52,10 +52,14 @@ import {
 import {
   getFontUploadUrlHandler,
   createFontHandler,
+  listComicFontsHandler,
+  updateFontHandler,
+  deleteFontHandler,
 } from "../controllers/font.controller.js";
 import {
   getFontUploadUrlSchema,
   createFontSchema,
+  updateFontSchema,
 } from "../validators/font.schema.js";
 import {
   createThemeSchema,
@@ -183,6 +187,7 @@ router.delete("/bubbles/:bubbleId", deleteBubbleHandler); // delete a single bub
 
 
 // FONTS
+router.get("/comics/:comicId/fonts", listComicFontsHandler); // list all fonts for a comic with bubble usage count
 router.post(
   "/comics/:comicId/fonts/upload-url",
   validateBody(getFontUploadUrlSchema),
@@ -193,6 +198,12 @@ router.post(
   validateBody(createFontSchema),
   createFontHandler
 ); // create a font for a comic
+router.patch(
+  "/fonts/:fontId",
+  validateBody(updateFontSchema),
+  updateFontHandler
+); // update font name or file
+router.delete("/fonts/:fontId", deleteFontHandler); // delete font (blocks if bubbles reference it)
 
 // LORA
 router.post(
