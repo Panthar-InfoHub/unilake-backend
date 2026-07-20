@@ -30,7 +30,7 @@ import {
 import {
   createPageSchema,
   getPageArtworkUploadUrlSchema,
-  updatePageSchema
+  updatePageSchema,
 } from "../validators/page.schema.js";
 import {
   createPageHandler,
@@ -39,8 +39,16 @@ import {
   updatePageHandler,
   deletePageHandler,
 } from "../controllers/page.controller.js";
-import { createBubbleSchema } from "../validators/bubble.schema.js";
-import { createBubbleHandler } from "../controllers/bubble.controller.js";
+import {
+  createBubbleSchema,
+  updateBubbleSchema,
+} from "../validators/bubble.schema.js";
+import {
+  createBubbleHandler,
+  listPageBubblesHandler,
+  updateBubbleHandler,
+  deleteBubbleHandler,
+} from "../controllers/bubble.controller.js";
 import {
   getFontUploadUrlHandler,
   createFontHandler,
@@ -49,19 +57,70 @@ import {
   getFontUploadUrlSchema,
   createFontSchema,
 } from "../validators/font.schema.js";
-import { createThemeSchema, updateThemeSchema } from "../validators/theme.schema.js";
-import { createThemeHandler, deleteThemeHandler, updateThemeHandler } from "../controllers/theme.controller.js";
-import { createAnnouncementSchema, reorderAnnouncementsSchema, updateAnnouncementSchema } from "../validators/announcement.schema.js";
-import { createAnnouncementHandler, deleteAnnouncementHandler, listAnnouncementsHandler, reorderAnnouncementsHandler, toggleAnnouncementStatusHandler, updateAnnouncementHandler } from "../controllers/announcement.controller.js";
-import { createHeroImageSchema, getHeroImageUploadUrlSchema } from "../validators/heroImage.schema.js";
-import { createHeroImageHandler, deleteHeroImageHandler, getAllHeroImagesHandler, getHeroImageUploadUrlHandler, toggleHeroImageStatusHandler } from "../controllers/heroImage.controller.js";
-import { createCustomerReviewSchema, getCustomerReviewUploadUrlSchema } from "../validators/customerReview.schema.js";
-import { createCustomerReviewHandler, deleteCustomerReviewHandler, getAllCustomerReviewsHandler, getCustomerReviewUploadUrlHandler, toggleCustomerReviewStatusHandler } from "../controllers/customerReview.controller.js";
-import { createTeamMemberSchema, getTeamMemberUploadUrlSchema, updateTeamMemberSchema } from "../validators/teamMember.schema.js";
-import { createTeamMemberHandler, deleteTeamMemberHandler, getActiveTeamMembersHandler, getAllTeamMembersHandler, getTeamMemberUploadUrlHandler, toggleTeamMemberStatusHandler, updateTeamMemberHandler } from "../controllers/teamMember.controller.js";
-import { deleteFeedbackHandler, getAllFeedbacksHandler, updateFeedbackStatusHandler } from "../controllers/feedback.controller.js";
+import {
+  createThemeSchema,
+  updateThemeSchema,
+} from "../validators/theme.schema.js";
+import {
+  createThemeHandler,
+  deleteThemeHandler,
+  updateThemeHandler,
+} from "../controllers/theme.controller.js";
+import {
+  createAnnouncementSchema,
+  reorderAnnouncementsSchema,
+  updateAnnouncementSchema,
+} from "../validators/announcement.schema.js";
+import {
+  createAnnouncementHandler,
+  deleteAnnouncementHandler,
+  listAnnouncementsHandler,
+  reorderAnnouncementsHandler,
+  toggleAnnouncementStatusHandler,
+  updateAnnouncementHandler,
+} from "../controllers/announcement.controller.js";
+import {
+  createHeroImageSchema,
+  getHeroImageUploadUrlSchema,
+} from "../validators/heroImage.schema.js";
+import {
+  createHeroImageHandler,
+  deleteHeroImageHandler,
+  getAllHeroImagesHandler,
+  getHeroImageUploadUrlHandler,
+  toggleHeroImageStatusHandler,
+} from "../controllers/heroImage.controller.js";
+import {
+  createCustomerReviewSchema,
+  getCustomerReviewUploadUrlSchema,
+} from "../validators/customerReview.schema.js";
+import {
+  createCustomerReviewHandler,
+  deleteCustomerReviewHandler,
+  getAllCustomerReviewsHandler,
+  getCustomerReviewUploadUrlHandler,
+  toggleCustomerReviewStatusHandler,
+} from "../controllers/customerReview.controller.js";
+import {
+  createTeamMemberSchema,
+  getTeamMemberUploadUrlSchema,
+  updateTeamMemberSchema,
+} from "../validators/teamMember.schema.js";
+import {
+  createTeamMemberHandler,
+  deleteTeamMemberHandler,
+  getActiveTeamMembersHandler,
+  getAllTeamMembersHandler,
+  getTeamMemberUploadUrlHandler,
+  toggleTeamMemberStatusHandler,
+  updateTeamMemberHandler,
+} from "../controllers/teamMember.controller.js";
+import {
+  deleteFeedbackHandler,
+  getAllFeedbacksHandler,
+  updateFeedbackStatusHandler,
+} from "../controllers/feedback.controller.js";
 import { updateFeedbackStatusSchema } from "../validators/feedback.schema.js";
-
 
 const router = Router();
 
@@ -76,32 +135,71 @@ router.get("/status", (req, res) => {
 
 // comic routes
 router.get("/comics", getAdminComicsHandler); // get the comic rotues
-router.get("/comics/:comicId", getAdminComicDetailHandler); // single comic full detail 
-router.post("/comics/thumbnail/upload-url", getThumbnailUploadUrlHandler);// For uploading the thumbnail of the Comic
-router.post("/comics", validateBody(createComicSchema), createComicHandler);// create comic 
-router.delete("/comics/:comicId", deleteComicHandler);// delete comic
-router.patch( "/comics/:comicId", validateBody(updateComicSchema), updateComicHandler );// update comic
+router.get("/comics/:comicId", getAdminComicDetailHandler); // single comic full detail
+router.post("/comics/thumbnail/upload-url", getThumbnailUploadUrlHandler); // For uploading the thumbnail of the Comic
+router.post("/comics", validateBody(createComicSchema), createComicHandler); // create comic
+router.delete("/comics/:comicId", deleteComicHandler); // delete comic
+router.patch(
+  "/comics/:comicId",
+  validateBody(updateComicSchema),
+  updateComicHandler
+); // update comic
 router.get("/comics/:comicId/pricing", getComicPricingHandler); // Get comic pricing
-router.put( "/comics/:comicId/pricing", validateBody(updateComicPricingSchema), updateComicPricingHandler );// update comic pricing
-router.patch( "/comics/:comicId/status", validateBody(updateComicStatusSchema), updateComicStatusHandler ); // Publishing the status of comic
+router.put(
+  "/comics/:comicId/pricing",
+  validateBody(updateComicPricingSchema),
+  updateComicPricingHandler
+); // update comic pricing
+router.patch(
+  "/comics/:comicId/status",
+  validateBody(updateComicStatusSchema),
+  updateComicStatusHandler
+); // Publishing the status of comic
 
 // PAGES
 router.get("/comics/:comicId/pages", listComicPagesHandler); // list all pages for a comic with nested bubbles
-router.post("/comics/:comicId/pages", validateBody(createPageSchema), createPageHandler); // create a new page
-router.post("/comics/:comicId/pages/upload-url", validateBody(getPageArtworkUploadUrlSchema), getPageArtworkUploadUrlHandler); // presigned upload URL for artwork/mask
-router.patch("/pages/:pageId", validateBody(updatePageSchema), updatePageHandler); // update page config
+router.post(
+  "/comics/:comicId/pages",
+  validateBody(createPageSchema),
+  createPageHandler
+); // create a new page
+router.post(
+  "/comics/:comicId/pages/upload-url",
+  validateBody(getPageArtworkUploadUrlSchema),
+  getPageArtworkUploadUrlHandler
+); // presigned upload URL for artwork/mask
+router.patch(
+  "/pages/:pageId",
+  validateBody(updatePageSchema),
+  updatePageHandler
+); // update page config
 router.delete("/pages/:pageId", deletePageHandler); // delete page (cascades bubbles)
 
 // BUBBLES
+router.get("/pages/:pageId/bubbles", listPageBubblesHandler); // list all bubbles for a page with font info
 router.post("/pages/:pageId/bubbles", validateBody(createBubbleSchema), createBubbleHandler); // create a bubble on a page
+router.patch("/bubbles/:bubbleId", validateBody(updateBubbleSchema), updateBubbleHandler); // update bubble coordinates, dialogue, font
+router.delete("/bubbles/:bubbleId", deleteBubbleHandler); // delete a single bubble
+
 
 // FONTS
-router.post("/comics/:comicId/fonts/upload-url", validateBody(getFontUploadUrlSchema), getFontUploadUrlHandler); // presigned upload URL for font file
-router.post("/comics/:comicId/fonts", validateBody(createFontSchema), createFontHandler); // create a font for a comic
+router.post(
+  "/comics/:comicId/fonts/upload-url",
+  validateBody(getFontUploadUrlSchema),
+  getFontUploadUrlHandler
+); // presigned upload URL for font file
+router.post(
+  "/comics/:comicId/fonts",
+  validateBody(createFontSchema),
+  createFontHandler
+); // create a font for a comic
 
 // LORA
-router.post("/comics/lora/upload-url", validateBody(getLoraUploadUrlSchema), getLoraUploadUrlHandler); // presigned upload URL for LoRA file
-
+router.post(
+  "/comics/lora/upload-url",
+  validateBody(getLoraUploadUrlSchema),
+  getLoraUploadUrlHandler
+); // presigned upload URL for LoRA file
 
 // country routes
 router.post("/countries/upload-url", getFlagUploadUrlHandler); // to upload the country flog image to the cloudflare
@@ -110,59 +208,94 @@ router.post("/countries", createCountryHandler); // to post the new country
 router.put("/countries/:countryId", updateCountryHandler); // to update the existing country
 router.delete("/countries/:countryId", deleteCountryHandler); // delete country (blocks if pricing rules reference it)
 
-
-
-
-// theme routes : 
-router.post("/themes", validateBody(createThemeSchema), createThemeHandler);// create 
-router.patch("/themes/:themeId", validateBody(updateThemeSchema), updateThemeHandler); // update
+// theme routes :
+router.post("/themes", validateBody(createThemeSchema), createThemeHandler); // create
+router.patch(
+  "/themes/:themeId",
+  validateBody(updateThemeSchema),
+  updateThemeHandler
+); // update
 router.delete("/themes/:themeId", deleteThemeHandler); // delete
 // get route is in public folder
 
-
-
 // announcement routes
-router.post('/announcements', validateBody(createAnnouncementSchema), createAnnouncementHandler);
-router.patch('/announcements/reorder', validateBody(reorderAnnouncementsSchema), reorderAnnouncementsHandler);
-router.patch('/announcements/:id', validateBody(updateAnnouncementSchema), updateAnnouncementHandler);
-router.get('/announcements', listAnnouncementsHandler);
-router.patch('/announcements/:id/status', toggleAnnouncementStatusHandler);
-router.delete('/announcements/:id', deleteAnnouncementHandler);
+router.post(
+  "/announcements",
+  validateBody(createAnnouncementSchema),
+  createAnnouncementHandler
+);
+router.patch(
+  "/announcements/reorder",
+  validateBody(reorderAnnouncementsSchema),
+  reorderAnnouncementsHandler
+);
+router.patch(
+  "/announcements/:id",
+  validateBody(updateAnnouncementSchema),
+  updateAnnouncementHandler
+);
+router.get("/announcements", listAnnouncementsHandler);
+router.patch("/announcements/:id/status", toggleAnnouncementStatusHandler);
+router.delete("/announcements/:id", deleteAnnouncementHandler);
 
-
-
-// hero images routes 
-router.post("/hero-images/upload-url", validateBody(getHeroImageUploadUrlSchema), getHeroImageUploadUrlHandler)
-router.post("/hero-images", validateBody(createHeroImageSchema), createHeroImageHandler);
+// hero images routes
+router.post(
+  "/hero-images/upload-url",
+  validateBody(getHeroImageUploadUrlSchema),
+  getHeroImageUploadUrlHandler
+);
+router.post(
+  "/hero-images",
+  validateBody(createHeroImageSchema),
+  createHeroImageHandler
+);
 router.patch("/hero-images/:id/status", toggleHeroImageStatusHandler);
 router.get("/hero-images", getAllHeroImagesHandler);
 router.delete("/hero-images/:id", deleteHeroImageHandler);
 
-
 // customer Reviews
-router.post("/customer-reviews/upload-url", validateBody(getCustomerReviewUploadUrlSchema), getCustomerReviewUploadUrlHandler);
-router.post("/customer-reviews", validateBody(createCustomerReviewSchema), createCustomerReviewHandler);
+router.post(
+  "/customer-reviews/upload-url",
+  validateBody(getCustomerReviewUploadUrlSchema),
+  getCustomerReviewUploadUrlHandler
+);
+router.post(
+  "/customer-reviews",
+  validateBody(createCustomerReviewSchema),
+  createCustomerReviewHandler
+);
 router.patch("/customer-reviews/:id/status", toggleCustomerReviewStatusHandler);
 router.delete("/customer-reviews/:id", deleteCustomerReviewHandler);
 router.get("/customer-reviews", getAllCustomerReviewsHandler);
 
-
-
-// team member's 
-router.post("/team-members/upload-url", validateBody(getTeamMemberUploadUrlSchema), getTeamMemberUploadUrlHandler);
-router.post("/team-members", validateBody(createTeamMemberSchema), createTeamMemberHandler);
-router.patch("/team-members/:id", validateBody(updateTeamMemberSchema), updateTeamMemberHandler);
+// team member's
+router.post(
+  "/team-members/upload-url",
+  validateBody(getTeamMemberUploadUrlSchema),
+  getTeamMemberUploadUrlHandler
+);
+router.post(
+  "/team-members",
+  validateBody(createTeamMemberSchema),
+  createTeamMemberHandler
+);
+router.patch(
+  "/team-members/:id",
+  validateBody(updateTeamMemberSchema),
+  updateTeamMemberHandler
+);
 router.patch("/team-members/:id/status", toggleTeamMemberStatusHandler);
 router.delete("/team-members/:id", deleteTeamMemberHandler);
 router.get("/team-members", getAllTeamMembersHandler);
 router.get("/team-members", getActiveTeamMembersHandler);
 
-
-
 // feedback
 router.get("/feedbacks", getAllFeedbacksHandler);
-router.patch("/feedbacks/:id/status", validateBody(updateFeedbackStatusSchema), updateFeedbackStatusHandler);
+router.patch(
+  "/feedbacks/:id/status",
+  validateBody(updateFeedbackStatusSchema),
+  updateFeedbackStatusHandler
+);
 router.delete("/feedbacks/:id", deleteFeedbackHandler);
-
 
 export default router;

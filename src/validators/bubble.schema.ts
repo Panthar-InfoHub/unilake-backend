@@ -11,4 +11,18 @@ export const createBubbleSchema = z.object({
   sortOrder: z.number().int().default(0),
 });
 
+export const updateBubbleSchema = z.object({
+  x: z.number().optional(),
+  y: z.number().optional(),
+  width: z.number().positive().optional(),
+  height: z.number().positive().optional(),
+  dialogue: z.string().min(1).optional(),
+  fontId: z.string().uuid().nullable().optional(),
+  fontSize: z.number().int().positive().optional(),
+  sortOrder: z.number().int().nonnegative().optional(),
+}).refine((data) => Object.keys(data).length > 0, {
+  message: "At least one field must be provided",
+});
+
 export type CreateBubbleInput = z.infer<typeof createBubbleSchema>;
+export type UpdateBubbleInput = z.infer<typeof updateBubbleSchema>;
