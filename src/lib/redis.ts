@@ -18,7 +18,7 @@ if (config.nodeEnv !== "production") {
 }
 
 redisClient.on("ready", () => {
-    logger.info("Succesfully connected to upstash Redis")
+    logger.info("Succesfully connected to Redis")
 })
 
 redisClient.on("error", (error) => {

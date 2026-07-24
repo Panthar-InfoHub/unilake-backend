@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ValidationError } from "../utils/errors.js";
+import { sendSuccess } from "../utils/response.js";
 import {
   createPage,
   getPageArtworkUploadUrl,
@@ -24,7 +25,7 @@ export const getPageArtworkUploadUrlHandler = asyncHandler(
     const input = getPageArtworkUploadUrlSchema.parse(req.body);
     const result = await getPageArtworkUploadUrl(comicId, input);
 
-    res.status(200).json(result);
+    sendSuccess(res, 200, result);
   }
 );
 
@@ -39,7 +40,7 @@ export const createPageHandler = asyncHandler(
     const input = createPageSchema.parse(req.body);
     const result = await createPage(comicId, input);
 
-    res.status(201).json(result);
+    sendSuccess(res, 201, result);
   }
 );
 
@@ -54,10 +55,7 @@ export const listComicPagesHandler = asyncHandler(
 
     const pages = await listComicPages(comicId);
 
-    res.status(200).json({
-      success: true,
-      data: pages,
-    });
+    sendSuccess(res, 200, pages);
   }
 );
 
@@ -71,10 +69,7 @@ export const updatePageHandler = asyncHandler(
 
     const page = await updatePage(pageId, req.body);
 
-    res.status(200).json({
-      success: true,
-      data: page,
-    });
+    sendSuccess(res, 200, page);
   }
 );
 

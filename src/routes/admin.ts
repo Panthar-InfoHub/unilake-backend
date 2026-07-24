@@ -298,7 +298,7 @@ router.patch(
 router.patch("/team-members/:id/status", toggleTeamMemberStatusHandler);
 router.delete("/team-members/:id", deleteTeamMemberHandler);
 router.get("/team-members", getAllTeamMembersHandler);
-router.get("/team-members", getActiveTeamMembersHandler);
+router.get("/team-members/active", getActiveTeamMembersHandler);
 
 // feedback
 router.get("/feedbacks", getAllFeedbacksHandler);

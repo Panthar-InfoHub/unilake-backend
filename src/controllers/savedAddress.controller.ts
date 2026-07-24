@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ValidationError } from "../utils/errors.js";
+import { sendSuccess } from "../utils/response.js";
 import {
   listUserAddresses,
   createAddress,
@@ -15,10 +16,7 @@ export const listAddressesHandler = asyncHandler(
 
     const addresses = await listUserAddresses(userId);
 
-    res.status(200).json({
-      success: true,
-      data: addresses,
-    });
+    sendSuccess(res, 200, addresses);
   }
 );
 
@@ -28,11 +26,7 @@ export const createAddressHandler = asyncHandler(
 
     const address = await createAddress(userId, req.body);
 
-    res.status(201).json({
-      success: true,
-      message: "Address saved successfully",
-      data: address,
-    });
+    sendSuccess(res, 201, address, "Address saved successfully");
   }
 );
 
@@ -47,10 +41,7 @@ export const updateAddressHandler = asyncHandler(
 
     const address = await updateAddress(id, userId, req.body);
 
-    res.status(200).json({
-      success: true,
-      data: address,
-    });
+    sendSuccess(res, 200, address);
   }
 );
 
@@ -80,10 +71,6 @@ export const setDefaultAddressHandler = asyncHandler(
 
     const address = await setDefaultAddress(id, userId);
 
-    res.status(200).json({
-      success: true,
-      message: "Default address updated",
-      data: address,
-    });
+    sendSuccess(res, 200, address, "Default address updated");
   }
 );

@@ -1,11 +1,12 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { sendSuccess } from "../utils/response.js";
 import { createTeamMember, deleteTeamMember, getActiveTeamMembers, getAllTeamMembers, getTeamMemberUploadUrl, toggleTeamMemberStatus, updateTeamMember } from "../services/teamMember.service.js";
 
 export const getTeamMemberUploadUrlHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const result = await getTeamMemberUploadUrl(req.body);
-    res.status(200).json(result);
+    sendSuccess(res, 200, result);
   }
 );
 
@@ -13,7 +14,7 @@ export const getTeamMemberUploadUrlHandler = asyncHandler(
 export const createTeamMemberHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const teamMember = await createTeamMember(req.body);
-    res.status(201).json(teamMember);
+    sendSuccess(res, 201, teamMember);
   }
 );
 
@@ -22,7 +23,7 @@ export const updateTeamMemberHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
     const teamMember = await updateTeamMember(id as string, req.body);
-    res.json(teamMember);
+    sendSuccess(res, 200, teamMember);
   }
 );
 
@@ -30,7 +31,7 @@ export const toggleTeamMemberStatusHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
     const teamMember = await toggleTeamMemberStatus(id as string);
-    res.json(teamMember);
+    sendSuccess(res, 200, teamMember);
   }
 );
 
@@ -46,7 +47,7 @@ export const deleteTeamMemberHandler = asyncHandler(
 export const getAllTeamMembersHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const teamMembers = await getAllTeamMembers();
-    res.json(teamMembers);
+    sendSuccess(res, 200, teamMembers);
   }
 );
 
@@ -54,6 +55,6 @@ export const getAllTeamMembersHandler = asyncHandler(
 export const getActiveTeamMembersHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const teamMembers = await getActiveTeamMembers();
-    res.json(teamMembers);
+    sendSuccess(res, 200, teamMembers);
   }
 );

@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ValidationError } from "../utils/errors.js";
+import { sendSuccess } from "../utils/response.js";
 import { getFontUploadUrl, createFont, listComicFonts, updateFont, deleteFont} from "../services/font.service.js";
 import {
   getFontUploadUrlSchema,
@@ -19,7 +20,7 @@ export const getFontUploadUrlHandler = asyncHandler(
     const input = getFontUploadUrlSchema.parse(req.body);
     const result = await getFontUploadUrl(comicId, input);
 
-    res.status(200).json(result);
+    sendSuccess(res, 200, result);
   }
 );
 
@@ -35,7 +36,7 @@ export const createFontHandler = asyncHandler(
     const input = createFontSchema.parse(req.body);
     const result = await createFont(comicId, input);
 
-    res.status(201).json(result);
+    sendSuccess(res, 201, result);
   }
 );
 
@@ -50,10 +51,7 @@ export const listComicFontsHandler = asyncHandler(
 
     const fonts = await listComicFonts(comicId);
 
-    res.status(200).json({
-      success: true,
-      data: fonts,
-    });
+    sendSuccess(res, 200, fonts);
   }
 );
 
@@ -67,10 +65,7 @@ export const updateFontHandler = asyncHandler(
 
     const font = await updateFont(fontId, req.body);
 
-    res.status(200).json({
-      success: true,
-      data: font,
-    });
+    sendSuccess(res, 200, font);
   }
 );
 

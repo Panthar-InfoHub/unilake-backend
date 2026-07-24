@@ -1,18 +1,19 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { sendSuccess } from "../utils/response.js";
 import { createHeroImage, deleteHeroImage, getActiveHeroImages, getAllHeroImages, getHeroImageUploadUrl, toggleHeroImageStatus } from "../services/heroImage.service.js";
 
 export const getHeroImageUploadUrlHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const result = await getHeroImageUploadUrl(req.body);
-    res.status(200).json(result);
+    sendSuccess(res, 200, result);
   }
 );
 
 export const createHeroImageHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const heroImage = await createHeroImage(req.body);
-    res.status(201).json(heroImage);
+    sendSuccess(res, 201, heroImage);
   }
 );
 
@@ -21,7 +22,7 @@ export const toggleHeroImageStatusHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
     const heroImage = await toggleHeroImageStatus(id as string);
-    res.json(heroImage);
+    sendSuccess(res, 200, heroImage);
   }
 );
 
@@ -30,7 +31,7 @@ export const toggleHeroImageStatusHandler = asyncHandler(
 export const getAllHeroImagesHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const heroImages = await getAllHeroImages();
-    res.json(heroImages);
+    sendSuccess(res, 200, heroImages);
   }
 );
 
@@ -38,7 +39,7 @@ export const getAllHeroImagesHandler = asyncHandler(
 export const getActiveHeroImagesHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const heroImages = await getActiveHeroImages();
-    res.json(heroImages);
+    sendSuccess(res, 200, heroImages);
   }
 );
 

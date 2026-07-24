@@ -21,7 +21,7 @@ export const errorHandler = (
    const errorCode = err instanceof AppError ? err.code : "INTERNAL_SERVER_ERROR";
    
    // 4. sanitize the messageif its  500 based error hide the real message to prevent the leaking in the server details
-   const isDev = config.nodeEnv === "devlopment";
+   const isDev = config.nodeEnv === "development";
    const message = statusCode === 500 && !isDev
    ? "An unexpected error occurred on the server."
    : err.message

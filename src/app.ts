@@ -16,6 +16,12 @@ import { requireLoggedIn } from "./middlewares/requireLoggedIn.js";
 const app = express();
 app.set("trust proxy", 1);
 
+// const allowedOrigins = [
+//   "http://localhost:3000",
+//   "https://www.unilake.com",   // update to real domain when known
+//   "https://unilake.com",       // apex, if used
+// ];
+
 app.use(
   pinoHttp({
     logger: logger,
@@ -24,7 +30,7 @@ app.use(
 app.use(
   cors({
     origin: "http://localhost:3000",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
@@ -33,7 +39,7 @@ app.all("/api/auth/*splat", toNodeHandler(auth));
 app.use(express.json());
 
 app.get("/health", (req, res) => {
-  res.send("Logger is working!");
+  res.send("App is working perfectly fine!");
 });
 app.use("/api/admin", requireAdmin, adminRoutes);
 app.use("/api/user", requireLoggedIn, userRouter);

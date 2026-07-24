@@ -35,7 +35,7 @@ export async function getPageArtworkUploadUrl(
   const contentType = contentTypeMap[fileExtension];
   const folder = fileType === "masks" ? "masks" : "artwork";
   const key =
-    "comics/${comicId}/pages/${folder}/${Date.now()}.${fileExtension}";
+    `comics/${comicId}/pages/${folder}/${Date.now()}.${fileExtension}`;
 
   const uploadUrl = await getSignedUploadUrl(
     "private",

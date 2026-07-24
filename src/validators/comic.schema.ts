@@ -94,6 +94,7 @@ export const updateComicSchema = z
     freePreviewPages: z.number().int().positive().optional(),
     loraStrength: z.number().min(0).max(2).optional(),
     loraKey: z.string().min(1).optional(),
+    thumbnailKey: z.string().min(1).optional(),
     description: z.string().min(1).optional(),
     themeId: z.string().uuid("Invalid theme ID").optional(),
     ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),

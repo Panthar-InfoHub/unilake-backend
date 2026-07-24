@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { sendSuccess } from "../utils/response.js";
 import {
   createOrderSession,
   createPhotoUploadUrl,
@@ -31,7 +32,7 @@ export const createSessionHandler = asyncHandler(
     }
     const session = await createOrderSession(req.body, userId);
 
-    res.status(201).json(session);
+    sendSuccess(res, 201, session);
   }
 );
 
@@ -43,7 +44,7 @@ export const updateSessionHandler = asyncHandler(async (req, res) => {
 
   const session = await updateOrderSession(sessionId, req.body);
 
-  res.status(200).json(session);
+  sendSuccess(res, 200, session);
 });
 
 export const getSessionHandler = asyncHandler(
@@ -56,7 +57,7 @@ export const getSessionHandler = asyncHandler(
 
     const session = await getOrderSessionId(sessionId);
 
-    res.status(200).json(session);
+    sendSuccess(res, 200, session);
   }
 );
 
@@ -69,7 +70,7 @@ export const createPhotoUploadUrlHandler = asyncHandler(async (req, res) => {
   const { fileExtension } = req.body;
   const result = await createPhotoUploadUrl(sessionId, fileExtension);
 
-  res.status(200).json(result);
+  sendSuccess(res, 200, result);
 });
 
 export const validateSessionPhotoHandler = asyncHandler(async (req, res) => {
@@ -81,28 +82,42 @@ export const validateSessionPhotoHandler = asyncHandler(async (req, res) => {
   const { key } = req.body;
   const result = await validateSessionPhoto(sessionId, key);
 
-  res.status(200).json(result);
+  sendSuccess(res, 200, result);
 });
 
 export const generateSessionHandler = asyncHandler(async (req, res) => {
-  const { sessionId } = generateSessionParamsSchema.parse({
+  const result = generateSessionParamsSchema.safeParse({
     sessionId: req.params.sessionId,
   });
 
-  const result = await triggerGeneration(sessionId);
+  if (!result.success) {
+    throw new ValidationError(
+      result.error.issues.map((i) => i.message).join(", ")
+    );
+  }
 
-  res.status(200).json(result);
+  const genResult = await triggerGeneration(result.data.sessionId);
+  sendSuccess(res, 200, genResult);
 });
 
 export const regeneratePageHandler = asyncHandler(async (req, res) => {
-  const { sessionId, pageNumber } = regeneratePageParamsSchema.parse({
+  const result = regeneratePageParamsSchema.safeParse({
     sessionId: req.params.sessionId,
     pageNumber: req.params.pageNumber,
   });
 
-  const result = await regeneratePage(sessionId, pageNumber);
+  if (!result.success) {
+    throw new ValidationError(
+      result.error.issues.map((i) => i.message).join(", ")
+    );
+  }
 
-  res.status(200).json(result);
+  const regenResult = await regeneratePage(
+    result.data.sessionId,
+    result.data.pageNumber
+  );
+
+  sendSuccess(res, 200, regenResult);
 });
 
 export const attachUserHandler = asyncHandler(
@@ -116,6 +131,6 @@ export const attachUserHandler = asyncHandler(
 
     const session = await attachUserToSession(sessionId, userId);
 
-    res.status(200).json(session);
+    sendSuccess(res, 200, session);
   }
 );

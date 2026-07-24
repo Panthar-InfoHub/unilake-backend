@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { sendSuccess } from "../utils/response.js";
 import { createFeedback, deleteFeedback, getAllFeedbacks, updateFeedbackStatus } from "../services/feedback.service.js";
 import { feedbackFilterQuerySchema } from "../validators/feedback.schema.js";
 import { ZodError} from "zod";
@@ -8,7 +9,7 @@ import { ValidationError } from "../utils/errors.js";
 export const createFeedbackHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const feedback = await createFeedback(req.body);
-    res.status(201).json(feedback);
+    sendSuccess(res, 201, feedback);
   }
 );
 
@@ -17,7 +18,7 @@ export const getAllFeedbacksHandler = asyncHandler(
     try {
       const validatedQuery = feedbackFilterQuerySchema.parse(req.query);
       const feedbacks = await getAllFeedbacks(validatedQuery.status);
-      res.json(feedbacks);
+      sendSuccess(res, 200, feedbacks);
     } catch (error: any) {
       if (error instanceof ZodError) {
         const errorMessages = error.issues
@@ -35,7 +36,7 @@ export const updateFeedbackStatusHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
     const feedback = await updateFeedbackStatus(id as string, req.body.status);
-    res.json(feedback);
+    sendSuccess(res, 200, feedback);
   }
 );
 

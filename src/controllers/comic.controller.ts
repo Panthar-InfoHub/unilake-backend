@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { z, ZodError, type ZodIssue } from "zod";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ValidationError } from "../utils/errors.js";
+import { sendSuccess } from "../utils/response.js";
 import { logger } from "../lib/logger.js";
 import {
   createComic,
@@ -46,14 +47,12 @@ export const getThumbnailUploadUrlHandler = asyncHandler(
         contentType
       );
 
-      res.status(200).json({
-        success: true,
-        message: "Presigned thumbnail upload URL generated successfully",
-        data: {
-          uploadUrl,
-          key,
-        },
-      });
+      sendSuccess(
+        res,
+        200,
+        { uploadUrl, key },
+        "Presigned thumbnail upload URL generated successfully"
+      );
     } catch (error: any) {
       if (error instanceof ZodError) {
         const errorMessages = error.issues
@@ -75,11 +74,7 @@ export const createComicHandler = asyncHandler(
 
     const newComic = await createComic(req.body);
 
-    res.status(201).json({
-      success: true,
-      message: "Comic catalogue item created successfully.",
-      data: newComic,
-    });
+    sendSuccess(res, 201, newComic, "Comic catalogue item created successfully.");
   }
 );
 
@@ -93,7 +88,7 @@ export const updateComicHandler = asyncHandler(
 
     const updatedComic = await updateComic(comicId, req.body);
 
-    res.status(200).json(updatedComic);
+    sendSuccess(res, 200, updatedComic);
   }
 );
 
@@ -125,11 +120,7 @@ export const updateComicPricingHandler = asyncHandler(
 
     const updatedComic = await updateComicPricing(comicId, req.body);
 
-    res.status(200).json({
-      success: true,
-      message: "Pricing rules fully replaced.",
-      data: updatedComic,
-    });
+    sendSuccess(res, 200, updatedComic, "Pricing rules fully replaced.");
   }
 );
 
@@ -147,11 +138,7 @@ export const getComicPricingHandler = asyncHandler(
 
     const pricingData = await getComicPricing(comicId);
 
-    res.status(200).json({
-      success: true,
-      message: "Pricing rules fetched successfully.",
-      data: pricingData,
-    });
+    sendSuccess(res, 200, pricingData, "Pricing rules fetched successfully.");
   }
 );
 
@@ -173,11 +160,12 @@ export const updateComicStatusHandler = asyncHandler(
     // req.body is validated by the router middleware
     const updatedComic = await updateComicStatus(comicId, req.body);
 
-    res.status(200).json({
-      success: true,
-      message: `Comic status successfully changed to ${updatedComic.status}.`,
-      data: updatedComic,
-    });
+    sendSuccess(
+      res,
+      200,
+      updatedComic,
+      `Comic status successfully changed to ${updatedComic.status}.`
+    );
   }
 );
 
@@ -188,10 +176,7 @@ export const getPublicComicsHandler = asyncHandler(
 
       const comics = await getPublicComicsList(validatedQuery);
 
-      res.status(200).json({
-        success: true,
-        data: comics,
-      });
+      sendSuccess(res, 200, comics);
     } catch (error: any) {
       if (error instanceof ZodError) {
         const errorMessages = error.issues
@@ -214,17 +199,14 @@ export const getPublicComicDetailsHandler = asyncHandler(async (req: Request, re
 
   const comic = await getPublicComicDetails(comicId);
 
-  res.status(200).json({
-    success: true,
-    data: comic,
-  });
+  sendSuccess(res, 200, comic);
 });
 
 //
 export const getLoraUploadUrlHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const result = await getLoraUploadUrl(req.body);
-    res.status(200).json(result);
+    sendSuccess(res, 200, result);
   }
 );
 
@@ -235,10 +217,7 @@ export const getAdminComicsHandler = asyncHandler(
       const validatedQuery = adminComicFilterQuerySchema.parse(req.query);
       const comics = await getAdminComicsList(validatedQuery);
 
-      res.status(200).json({
-        success: true,
-        data: comics,
-      });
+      sendSuccess(res, 200, comics);
     } catch (error: any) {
       if (error instanceof ZodError) {
         const errorMessages = error.issues
@@ -261,9 +240,6 @@ export const getAdminComicDetailHandler = asyncHandler(
 
     const comic = await getAdminComicDetail(comicId);
 
-    res.status(200).json({
-      success: true,
-      data: comic,
-    });
+    sendSuccess(res, 200, comic);
   }
 );

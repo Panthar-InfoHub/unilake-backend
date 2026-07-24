@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { success, z, ZodError, type ZodIssue } from "zod";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ValidationError } from "../utils/errors.js";
+import { sendSuccess } from "../utils/response.js";
 import { logger } from "../lib/logger.js";
 import {
   generateFlagUploadUrl,
@@ -39,14 +40,12 @@ export const getFlagUploadUrlHandler = asyncHandler(
         contentType
       );
 
-      res.status(200).json({
-        success: true,
-        message: "Presigned upload URL generated successfully",
-        data: {
-          uploadUrl,
-          key,
-        },
-      });
+      sendSuccess(
+        res,
+        200,
+        { uploadUrl, key },
+        "Presigned upload URL generated successfully"
+      );
     } catch (error: any) {
       if (error instanceof ZodError) {
         const errorMessages = error.issues
@@ -69,11 +68,7 @@ export const createCountryHandler = asyncHandler(
 
       const newCountry = await createCountry(validatedData);
 
-      res.status(201).json({
-        success: true,
-        message: "Country record created successfully.",
-        data: newCountry,
-      });
+      sendSuccess(res, 201, newCountry, "Country record created successfully.");
     } catch (error) {
       if (error instanceof ZodError) {
         const errorMessages = error.issues
@@ -109,12 +104,7 @@ export const updateCountryHandler = asyncHandler(
 
       const updatedCountry = await updateCountry(countryId, validatedData);
 
-
-      res.status(200).json({
-      success: true,
-      message: "Country record updated successfully.",
-      data: updatedCountry,
-    });
+      sendSuccess(res, 200, updatedCountry, "Country record updated successfully.");
 
     }catch (error) {
     if (error instanceof ZodError) {
@@ -132,12 +122,8 @@ export const getAllCountriesHandler = asyncHandler(async (req: Request, res : Re
 
     const countries = await getAllCountries();
 
-    res.status(200).json({
-        success: true,
-        messages: "Countries fetched succesfully",
-        data: countries
-    })
-}) 
+    sendSuccess(res, 200, countries);
+})
 
 
 export const deleteCountryHandler = asyncHandler(

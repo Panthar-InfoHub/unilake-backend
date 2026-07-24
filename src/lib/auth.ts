@@ -1,13 +1,14 @@
-import {betterAuth} from 'better-auth'
-import { prismaAdapter } from 'better-auth/adapters/prisma'
-import {prisma} from './prisma.js'
-import { config } from '../config/env.js'
+import { betterAuth } from "better-auth";
+import { prismaAdapter } from "better-auth/adapters/prisma";
+import { prisma } from "./prisma.js";
+import { config } from "../config/env.js";
 
+const isProd = process.env.NODE_ENV === "production";
 
 export const auth = betterAuth({
   baseURL: config.betterAuthUrl,
   database: prismaAdapter(prisma, {
-    provider: 'postgresql',
+    provider: "postgresql",
   }),
   emailAndPassword: {
     enabled: true,
@@ -19,29 +20,40 @@ export const auth = betterAuth({
     },
     facebook: {
       clientId: config.facebookId,
-      clientSecret: config.facebookSecret ,
+      clientSecret: config.facebookSecret,
+      mapProfileToUser: (profile) => {
+        return {
+          email: profile.email || `${profile.id}@facebook.local`,
+          name: profile.name,
+          image: profile.picture?.data?.url,
+        };
+      },
     },
   },
-  user : {
+  user: {
     additionalFields: {
-      role : {
-        type : ['ADMIN', 'USER'],
+      role: {
+        type: ["ADMIN", "USER"],
         required: false,
-        defaultValue: 'USER',
+        defaultValue: "USER",
         input: false,
-      }
-    }
+      },
+    },
   },
-  advanced : {
+  advanced: {
     defaultCookieAttributes: {
-      sameSite: "none",
-      secure: true,
+      sameSite: isProd ? "none" : "lax",
+      secure: isProd,
       httpOnly: true,
     },
+    // When you have the real domain, uncomment and update this:
+    // crossSubDomainCookies: isProd
+    //   ? { enabled: true, domain: ".unilake.com" }
+    //   : { enabled: false },
   },
   trustedOrigins: [
-    'http://localhost:3000', // your frontend dev URL — adjust to your actual frontend port
-    'https://unilake-backend-590672762351.asia-south1.run.app',
-    'https://unilake-backend.onrender.com'
+    "http://localhost:3000", // your frontend dev URL — adjust to your actual frontend port
+    "https://unilake-backend-590672762351.asia-south1.run.app",
+    "https://unilake-backend.onrender.com",
   ],
-})
+});

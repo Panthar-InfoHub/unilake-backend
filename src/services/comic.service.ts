@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { getPublicUrl, getSignedUploadUrl } from "../lib/r2.js";
+import { deleteFile, getPublicUrl, getSignedUploadUrl } from "../lib/r2.js";
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
+import { config } from "../config/env.js";
 import {
   ConflictError,
   NotFoundError,
@@ -96,6 +97,7 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     }
 
     const updateData: Prisma.ComicUpdateInput = {};
+    let oldR2Key: string | null = null;
 
     if (data.title !== undefined) updateData.title = data.title;
     if (data.genderTag !== undefined) updateData.genderTag = data.genderTag;
@@ -103,6 +105,14 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     if (data.freePreviewPages !== undefined) updateData.freePreviewPages = data.freePreviewPages;
     if (data.loraStrength !== undefined) updateData.loraStrength = data.loraStrength;
     if (data.loraKey !== undefined) updateData.loraFileUrl = data.loraKey;
+    if (data.thumbnailKey !== undefined) {
+      updateData.coverThumbnailUrl = getPublicUrl(data.thumbnailKey);
+
+      if (comic.coverThumbnailUrl) {
+        const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+        oldR2Key = comic.coverThumbnailUrl.replace(`${publicBase}/`, "");
+      }
+    }
     if (data.description !== undefined) updateData.description = data.description;
     if (data.themeId !== undefined) updateData.theme = { connect: { id: data.themeId } };
     if (data.ageGroup !== undefined) updateData.ageGroup = data.ageGroup;
@@ -116,6 +126,15 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
       where: { id: comicId },
       data: updateData,
     });
+
+    if (oldR2Key) {
+      try {
+        await deleteFile("public", oldR2Key);
+        logger.info({ comicId, oldR2Key }, "Old comic thumbnail deleted from R2");
+      } catch (error) {
+        logger.warn({ error, comicId, oldR2Key }, "Failed to delete old comic thumbnail from R2");
+      }
+    }
 
     logger.info(
       { comicId, updatedFields: Object.keys(updateData) },

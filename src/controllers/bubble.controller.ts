@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ValidationError } from "../utils/errors.js";
+import { sendSuccess } from "../utils/response.js";
 import {
   createBubble,
   listPageBubbles,
@@ -20,7 +21,7 @@ export const createBubbleHandler = asyncHandler(
     const input = createBubbleSchema.parse(req.body);
     const result = await createBubble(pageId, input);
 
-    res.status(201).json(result);
+    sendSuccess(res, 201, result);
   }
 );
 
@@ -35,10 +36,7 @@ export const listPageBubblesHandler = asyncHandler(
 
     const bubbles = await listPageBubbles(pageId);
 
-    res.status(200).json({
-      success: true,
-      data: bubbles,
-    });
+    sendSuccess(res, 200, bubbles);
   }
 );
 
@@ -52,10 +50,7 @@ export const updateBubbleHandler = asyncHandler(
 
     const bubble = await updateBubble(bubbleId, req.body);
 
-    res.status(200).json({
-      success: true,
-      data: bubble,
-    });
+    sendSuccess(res, 200, bubble);
   }
 );
 

@@ -3,6 +3,8 @@ import type { Server } from "http";
 import { logger } from "../lib/logger.js";
 import { getOrderSessionId } from "../services/session.service.js";
 import { joinRoom, leaveRoom } from "./rooms.js";
+
+
 export function setupWebSocket(httpServer: Server) {
   const wss = new WebSocketServer({ noServer: true });
 
@@ -43,7 +45,7 @@ export function setupWebSocket(httpServer: Server) {
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit("connection", ws, req);
+      wss.emit("connection", ws, req, sessionId);
     });
   });
 
