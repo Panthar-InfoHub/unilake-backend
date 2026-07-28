@@ -15,6 +15,7 @@ import type {
   GetLoraUploadUrlInput,
   UpdateComicPricingInput,
   UpdateComicStatusInput,
+  UploadThumbnailsBatchInput,
 } from "../validators/comic.schema.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import type { UpdateComicInput } from "../validators/comic.schema.js";
@@ -44,15 +45,14 @@ export const createComic = async (data: CreateComicInput) => {
       "Attempting to create new comic catalogue item..."
     );
 
-    const { thumbnailKey, pricing, loraKey, ...restData } = data;
-
-    const coverThumbnailUrl = getPublicUrl(thumbnailKey);
+    const { thumbnailKeys, pricing, loraKey, ...restData } = data;
+    const coverThumbnailUrls = thumbnailKeys.map(getPublicUrl);
 
     const newComic = await prisma.$transaction(async (tx) => {
       const comic = await tx.comic.create({
         data: {
           ...restData,
-          coverThumbnailUrl,
+          coverThumbnailUrls,
           status: "DRAFT",
           ...(loraKey !== undefined && { loraFileUrl: loraKey }),
         },
@@ -97,7 +97,7 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     }
 
     const updateData: Prisma.ComicUpdateInput = {};
-    let oldR2Key: string | null = null;
+    let oldR2KeysToDelete: string[] = [];
 
     if (data.title !== undefined) updateData.title = data.title;
     if (data.genderTag !== undefined) updateData.genderTag = data.genderTag;
@@ -105,13 +105,13 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     if (data.freePreviewPages !== undefined) updateData.freePreviewPages = data.freePreviewPages;
     if (data.loraStrength !== undefined) updateData.loraStrength = data.loraStrength;
     if (data.loraKey !== undefined) updateData.loraFileUrl = data.loraKey;
-    if (data.thumbnailKey !== undefined) {
-      updateData.coverThumbnailUrl = getPublicUrl(data.thumbnailKey);
+    if (data.thumbnailKeys !== undefined) {
+      const newUrls = data.thumbnailKeys.map(getPublicUrl);
+      updateData.coverThumbnailUrls = newUrls;
 
-      if (comic.coverThumbnailUrl) {
-        const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
-        oldR2Key = comic.coverThumbnailUrl.replace(`${publicBase}/`, "");
-      }
+      const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+      const removedUrls = comic.coverThumbnailUrls.filter((u) => !newUrls.includes(u));
+      oldR2KeysToDelete = removedUrls.map((u) => u.replace(`${publicBase}/`, ""));
     }
     if (data.description !== undefined) updateData.description = data.description;
     if (data.themeId !== undefined) updateData.theme = { connect: { id: data.themeId } };
@@ -127,7 +127,7 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
       data: updateData,
     });
 
-    if (oldR2Key) {
+    for (const oldR2Key of oldR2KeysToDelete) {
       try {
         await deleteFile("public", oldR2Key);
         logger.info({ comicId, oldR2Key }, "Old comic thumbnail deleted from R2");
@@ -135,7 +135,6 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
         logger.warn({ error, comicId, oldR2Key }, "Failed to delete old comic thumbnail from R2");
       }
     }
-
     logger.info(
       { comicId, updatedFields: Object.keys(updateData) },
       "Successfully updated comic"
@@ -182,6 +181,20 @@ export async function deleteComic(comicId: string) {
     throw new ConflictError(
       `Cannot delete this comic — it has ${activeSessionCount} active order session(s). Wait for them to complete or fail first.`
     );
+  }
+
+  // Best-effort R2 cleanup for all thumbnails before DB delete
+  if (comic.coverThumbnailUrls.length > 0) {
+    const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+    for (const url of comic.coverThumbnailUrls) {
+      const key = url.replace(`${publicBase}/`, "");
+      try {
+        await deleteFile("public", key);
+        logger.info({ comicId, key }, "Deleted comic thumbnail from R2");
+      } catch (error) {
+        logger.warn({ error, comicId, key }, "Failed to delete comic thumbnail from R2");
+      }
+    }
   }
 
   await prisma.comic.delete({ where: { id: comicId } });
@@ -296,9 +309,9 @@ export const updateComicStatus = async (
     }
 
     if (data.status === "PUBLISHED") {
-      if (!comic.coverThumbnailUrl) {
+      if (comic.coverThumbnailUrls.length === 0) {
         throw new ValidationError(
-          "Cannot publish comic: Missing cover thumbnail."
+          "Cannot publish comic: at least one cover thumbnail is required."
         );
       }
 
@@ -325,9 +338,7 @@ export const updateComicStatus = async (
   }
 };
 
-export const getPublicComicsList = async (
-  filters: ComicFilterQueryInput
-) => {
+export const getPublicComicsList = async (filters: ComicFilterQueryInput) => {
   const where: Prisma.ComicWhereInput = {
     status: "PUBLISHED",
   };
@@ -361,7 +372,7 @@ export const getPublicComicsList = async (
       ageGroup: true,
       isBestseller: true,
       pageCount: true,
-      coverThumbnailUrl: true,
+      coverThumbnailUrls: true,
       theme: {
         select: {
           id: true,
@@ -402,7 +413,7 @@ export const getPublicComicDetails = async (comicId: string) => {
       isBestseller: true,
       pageCount: true,
       freePreviewPages: true,
-      coverThumbnailUrl: true,
+      coverThumbnailUrls: true,
       theme: {
         select: {
           id: true,
@@ -460,7 +471,6 @@ export const getLoraUploadUrl = async (input: GetLoraUploadUrlInput) => {
   return { uploadUrl, key };
 };
 
-
 export async function getAdminComicsList(filters: AdminComicFilterQueryInput) {
   const where: Prisma.ComicWhereInput = {};
 
@@ -505,8 +515,6 @@ export async function getAdminComicsList(filters: AdminComicFilterQueryInput) {
 
   return comics;
 }
-
-
 
 export const getAdminComicDetail = async (comicId: string) => {
   const comic = await prisma.comic.findUnique({
@@ -563,3 +571,17 @@ export const getAdminComicDetail = async (comicId: string) => {
 };
 
 
+export const generateThumbnailUploadUrlsBatch = async (
+  files: UploadThumbnailsBatchInput["files"]
+) => {
+  logger.info(
+    { count: files.length },
+    "Generating batch of thumbnail upload URLs"
+  );
+
+  const uploads = await Promise.all(
+    files.map((f) => generateThumbnailUploadUrl(f.fileName, f.contentType))
+  );
+
+  return { uploads };
+};

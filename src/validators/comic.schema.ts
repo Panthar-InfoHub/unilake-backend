@@ -22,9 +22,14 @@ export const createComicSchema = z
       .int("Free preview pages must be a whole number")
       .nonnegative("Free preview pages cannot be negative"),
 
-    thumbnailKey: z
-      .string({ message: "Thumbnail key is required" })
-      .min(1, "Thumbnail key cannot be empty"),
+    thumbnailKeys: z
+      .array(
+        z
+          .string({ message: "Thumbnail key must be a string" })
+          .min(1, "Thumbnail key cannot be empty")
+      )
+      .min(1, "At least one thumbnail is required")
+      .max(10, "Maximum 10 thumbnails per comic"),
 
     pricing: z
       .array(
@@ -94,7 +99,11 @@ export const updateComicSchema = z
     freePreviewPages: z.number().int().positive().optional(),
     loraStrength: z.number().min(0).max(2).optional(),
     loraKey: z.string().min(1).optional(),
-    thumbnailKey: z.string().min(1).optional(),
+    thumbnailKeys: z
+      .array(z.string().min(1))
+      .min(1, "At least one thumbnail is required")
+      .max(10, "Maximum 10 thumbnails per comic")
+      .optional(),
     description: z.string().min(1).optional(),
     themeId: z.string().uuid("Invalid theme ID").optional(),
     ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
@@ -107,6 +116,24 @@ export const updateComicSchema = z
 export const getLoraUploadUrlSchema = z.object({
   fileName: z.string().min(1),
 });
+
+export const uploadThumbnailsBatchSchema = z.object({
+  files: z
+    .array(
+      z.object({
+        fileName: z.string().min(1, "File name is required"),
+        contentType: z
+          .string()
+          .regex(
+            /^image\/(png|jpeg|jpg|webp)$/,
+            "Invalid content type. Only PNG, JPEG, and WEBP images are allowed for thumbnails."
+          ),
+      })
+    )
+    .min(1, "At least one file is required")
+    .max(10, "Maximum 10 thumbnails per request"),
+});
+
 
 export const adminComicFilterQuerySchema = z.object({
   gender: z.enum(["BOY", "GIRL", "UNISEX"]).optional(),
@@ -121,7 +148,10 @@ export type UpdateComicStatusInput = z.infer<typeof updateComicStatusSchema>;
 export type ComicFilterQueryInput = z.infer<typeof comicFilterQuerySchema>;
 export type UpdateComicInput = z.infer<typeof updateComicSchema>;
 export type GetLoraUploadUrlInput = z.infer<typeof getLoraUploadUrlSchema>;
-export type AdminComicFilterQueryInput = z.infer<typeof adminComicFilterQuerySchema>;
+export type AdminComicFilterQueryInput = z.infer<
+  typeof adminComicFilterQuerySchema
+>;
+export type UploadThumbnailsBatchInput = z.infer<typeof uploadThumbnailsBatchSchema>;
 
 // export const updateComicSchema = createComicSchema.partial();
 // export type UpdateComicInput = z.infer<typeof updateComicSchema>;

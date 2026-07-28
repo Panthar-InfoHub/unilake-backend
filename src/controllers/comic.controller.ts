@@ -6,7 +6,7 @@ import { sendSuccess } from "../utils/response.js";
 import { logger } from "../lib/logger.js";
 import {
   createComic,
-  generateThumbnailUploadUrl,
+  generateThumbnailUploadUrlsBatch,
   updateComicPricing,
   getComicPricing,
   updateComicStatus,
@@ -18,7 +18,12 @@ import {
   getAdminComicsList,
   getAdminComicDetail
 } from "../services/comic.service.js";
-import { adminComicFilterQuerySchema, comicFilterQuerySchema, getLoraUploadUrlSchema } from "../validators/comic.schema.js";
+import {
+  adminComicFilterQuerySchema,
+  comicFilterQuerySchema,
+  getLoraUploadUrlSchema,
+  uploadThumbnailsBatchSchema,
+} from "../validators/comic.schema.js";
 
 const uploadThumbnailRequestSchema = z.object({
   fileName: z.string().min(1, "File name is required"),
@@ -30,28 +35,58 @@ const uploadThumbnailRequestSchema = z.object({
     ),
 });
 
-export const getThumbnailUploadUrlHandler = asyncHandler(
+// export const getThumbnailUploadUrlHandler = asyncHandler(
+//   async (req: Request, res: Response) => {
+//     try {
+//       logger.debug(
+//         { body: req.body },
+//         "Incoming request for comic thumbnail upload URL"
+//       );
+
+//       const { fileName, contentType } = uploadThumbnailRequestSchema.parse(
+//         req.body
+//       );
+
+//       const { uploadUrl, key } = await generateThumbnailUploadUrl(
+//         fileName,
+//         contentType
+//       );
+
+//       sendSuccess(
+//         res,
+//         200,
+//         { uploadUrl, key },
+//         "Presigned thumbnail upload URL generated successfully"
+//       );
+//     } catch (error: any) {
+//       if (error instanceof ZodError) {
+//         const errorMessages = error.issues
+//           .map((issue: ZodIssue) => issue.message)
+//           .join(", ");
+//         throw new ValidationError(errorMessages);
+//       }
+//       throw error;
+//     }
+//   }
+// );
+
+export const getThumbnailUploadUrlsBatchHandler = asyncHandler(
   async (req: Request, res: Response) => {
     try {
       logger.debug(
         { body: req.body },
-        "Incoming request for comic thumbnail upload URL"
+        "Incoming request for batch thumbnail upload URLs"
       );
 
-      const { fileName, contentType } = uploadThumbnailRequestSchema.parse(
-        req.body
-      );
+      const { files } = uploadThumbnailsBatchSchema.parse(req.body);
 
-      const { uploadUrl, key } = await generateThumbnailUploadUrl(
-        fileName,
-        contentType
-      );
+      const result = await generateThumbnailUploadUrlsBatch(files);
 
       sendSuccess(
         res,
         200,
-        { uploadUrl, key },
-        "Presigned thumbnail upload URL generated successfully"
+        result,
+        "Presigned thumbnail upload URLs generated successfully"
       );
     } catch (error: any) {
       if (error instanceof ZodError) {

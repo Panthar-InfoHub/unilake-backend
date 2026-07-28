@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { getPublicUrl, getSignedUploadUrl } from "../lib/r2.js";
+import { getPublicUrl, getSignedUploadUrl, deleteFile } from "../lib/r2.js";
 import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import { NotFoundError } from "../utils/errors.js";
+import { config } from "../config/env.js";
 
 const UPLOAD_EXPIRY_SECONDS = 15 * 60;
 
@@ -39,7 +40,6 @@ export async function createHeroImage(data: { imageKey: string }) {
   return heroImage;
 }
 
-
 export async function toggleHeroImageStatus(id: string) {
   const existing = await prisma.heroImage.findUnique({ where: { id } });
 
@@ -52,7 +52,10 @@ export async function toggleHeroImageStatus(id: string) {
     data: { isActive: !existing.isActive },
   });
 
-  logger.info({ heroImageId: id, isActive: updated.isActive }, "Hero image status toggled");
+  logger.info(
+    { heroImageId: id, isActive: updated.isActive },
+    "Hero image status toggled"
+  );
 
   return updated;
 }
@@ -80,8 +83,20 @@ export async function deleteHeroImage(id: string) {
   if (!existing) {
     throw new NotFoundError("Hero image not found");
   }
+  const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+  const r2Key = existing.imageUrl.replace(`${publicBase}/`, "");
 
   await prisma.heroImage.delete({ where: { id } });
+
+  try {
+    await deleteFile("public", r2Key);
+    logger.info(
+      { heroImageId: id, r2Key },
+      "Hero immage has been deleted successsfully"
+    );
+  } catch (error: any) {
+    logger.warn({ error, heroImageId: id, r2Key }, "Hero image deleted from the database but R2 cleanup failed");
+  }
 
   logger.info({ heroImageId: id }, "Hero image deleted");
 }

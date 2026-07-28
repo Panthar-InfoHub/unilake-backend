@@ -124,7 +124,7 @@ model Comic {
   genderTag         GenderTag
   pageCount         Int
   freePreviewPages  Int
-  coverThumbnailUrl String?
+  coverThumbnailUrls String[] @default([])
   loraFileUrl       String?
   loraStrength      Float       @default(1.0)
   status            ComicStatus @default(DRAFT)
@@ -163,6 +163,9 @@ model Page {
   faceDirection String? // "front" | "three-quarter" | "side"
   isPreviewPage Boolean @default(false) // part of free preview (pages 1–10 typically)
   pagePrompt    String? @db.Text
+
+  steps Int   @default(3)
+  cfg   Float @default(1.0)
 
   bubbles     Bubble[]
   pageVersion PageVersion[]
@@ -249,7 +252,6 @@ enum OrderSessionStatus {
   GENERATING_PAID // pages 11–24 generating
   PAID_PAGES_READY
   CONFIRMED // user selected variants for all 24 pages
-  GENERATING_HD
   COMPILING_PDF
   DISPATCHED
   COMPLETED
@@ -310,10 +312,10 @@ model OrderSession {
 
 enum PageVersionStatus {
   QUEUED
+  TEXT_STAMPING
+  TEXT_STAMPED
   GENERATING_SD
   SD_READY
-  GENERATING_HD
-  HD_READY
   FAILED
 }
 
@@ -329,13 +331,9 @@ model PageVersion {
   variantIndex Int     @default(0) // 0,1,2... up to 3-4 free / 8 paid
   seed         BigInt? // ComfyUI seed used, stored for reproducibility
 
-  comfyPromptId1 String? // style-conversion job id
-  comfyPromptId2 String? // face-swap job id
-  comfyPromptId3 String? // HD upscale job id
-
-  sdImageUrl      String? // face-swapped, pre-text R2 path
-  textRenderedUrl String? // Sharp output — text baked in (SD resolution)
-  hdImageUrl      String? // final upscaled 2480x3508 R2 path
+  textStampedUrl String?  // Sharp output — artwork with text stamped, INPUT to ComfyUI
+  comfyJobId     String?  // RunPod job ID for the face-swap job
+  finalImageUrl  String?  // ComfyUI output — face-swapped + text-stamped, shown to user & used in PDF
 
   isSelected   Boolean           @default(false) // chosen by user at confirm step
   status       PageVersionStatus @default(QUEUED)

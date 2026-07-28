@@ -2,7 +2,7 @@
 
 **Rewritten every session.** Overwrite, don't append. Keep it small.
 
-**Last updated:** July 24, 2026 (post bug-audit + response-standardization + frontend-handoff session)
+**Last updated:** July 26, 2026 (post RunPod client-endpoint deployment + per-page tunables session)
 
 ---
 
@@ -10,11 +10,11 @@
 
 **Infrastructure & scaffold:**
 - Express + TypeScript ESM, `app.ts`/`server.ts` split, centralized error handling, `asyncHandler`
-- Prisma schema on Neon Postgres (see `schema.prisma`)
+- Prisma schema on Neon Postgres
 - Two-bucket R2 setup + `r2.ts` helper library
-- Redis + BullMQ: 3 queues, 3 stub workers, graceful shutdown
+- Redis + BullMQ: `sd-generation` + `pdf-compilation` queues, stub workers, graceful shutdown
 - Better Auth: Google + Facebook + email/password, custom `role` field
-- Docker: multi-stage, Python stripped, ~250MB, deployed to Cloud Run `asia-south1`
+- Docker: multi-stage, Python stripped, ~250 MB, deployed to Cloud Run `asia-south1`
 - GitHub Actions CI/CD → Artifact Registry → Cloud Run
 
 **Auth:**
@@ -30,77 +30,85 @@
 **Order flow (partial):**
 - `OrderSession` create/patch/get, WebSocket server with token auth
 - Photo upload URL + Python validation pipeline (still live — see Open Questions)
-- Generate trigger + per-page regenerate endpoints (enqueue jobs only — SD/HD workers are stubs, nothing actually generates yet)
+- Generate trigger + per-page regenerate endpoints (enqueue jobs only — SD worker is a stub)
 
-**ComfyUI/RunPod learning (not deployed to client yet — carried over, untouched this session):**
-- Face-swap workflow processed through comfy.getrunpod.io, GitHub repo created, Docker image built ("Ready")
-- api-workflow.json confirmed usable as backend template; full path validated up to RunPod deploy step (halted on personal-account credit)
+**ComfyUI/RunPod endpoint (LIVE on client infra):**
+- Deployed via comfy.getrunpod.io → GitHub → RunPod GitHub integration on `unilakebooks-web` org
+- End-to-end proven: real payload (comic page + kid photo + mask) → 6.6s delay + 1m 16s execution → face-swapped image returned
+- Endpoint ID `bwdfkrlaocqm3o`, base image `runpod/worker-comfyui:5.8.4-base` (CUDA 12.x)
+- Test config live: Active=0, Max=5, FlashBoot on, 48 GB tier ($1.22/hr), 90s idle, 300s exec timeout, RTX 3090/L4/A5000/PRO 6000 MIG enabled
+- Warm-request latency measured at ~86s per job
+- Rough projected timing for 10 preview pages across 5 workers: fully warm ~3 min, FlashBoot cold ~2.5–3.5 min, fully cold ~5–8 min
 
-**This session — bug audit + fixes (all `npx tsc --noEmit` clean):**
-- Fixed WebSocket room-join bug — `sessionId` wasn't being passed through `wss.emit("connection", ...)`, so every socket joined a room literally named "undefined." `page:ready`/`page:error` now actually reach the right client.
-- Fixed `generateSessionHandler` and `regeneratePageHandler` — were using raw `.parse()`, so a bad `sessionId`/`pageNumber` produced an uncaught 500 instead of a clean 400. Now use `safeParse` + `ValidationError`.
-- Fixed `errorHandler.ts` typo (`"devlopment"` vs `"development"`) that permanently suppressed real error messages, even in local dev.
-- Fixed duplicate `GET /team-members` route registration in `admin.ts` — split into `/team-members` (all) and `/team-members/active`.
-- **Standardized every controller's success response** to `{ success: true, data, message? }` via a new shared helper, `src/utils/response.ts` → `sendSuccess()`. Swept all 13 controllers. Also fixed a `messages` (typo key) in `country.controller.ts` and two raw/unwrapped handlers in `comic.controller.ts`.
-- Added `thumbnailKey` support to `updateComicSchema` + `updateComic` — comic thumbnails can now be changed after creation via `PATCH /comics/:comicId`, with the old R2 file cleaned up best-effort (same pattern as `updateTeamMember`).
-- Authored `FRONTEND_HANDOFF.md` — full API reference for every live endpoint (real request/response shapes from the actual Zod validators + controllers, not guessed), auth/CORS/error-contract docs, WebSocket protocol, end-to-end order-flow walkthrough, state machine tables, business rules, and an explicit doc/code mismatch section.
+**This session — per-page generation tunables (all `npx tsc --noEmit` clean, migration applied):**
+- Added `Page.steps` (Int, default 3) and `Page.cfg` (Float, default 1.0) via migration `add-page-generation-tunables`
+- Bounds constants in `src/config/generation.ts`: `DEFAULT_STEPS=3`, `MIN_STEPS=1`, `MAX_STEPS=8`, `DEFAULT_CFG=1.0`, `MIN_CFG=1.0`, `MAX_CFG=3.0`
+- `createPageSchema` + `updatePageSchema` accept both fields, bounds-enforced via imported constants
+- `page.service.ts` create + update flow both new fields through
+- Bounds reflect Lightning LoRA training envelope — Zod blocks out-of-range values before they reach RunPod
 
 ---
 
 ## IN PROGRESS
 
-Nothing actively in progress. Client-account ComfyUI deployment is still the next big lift; CORS production-origin update is a small deferred task (see Next).
+Nothing actively in progress. Ready to start real SD worker pipeline.
 
 ---
 
 ## NEXT (priority order)
 
-1. **Update CORS allowed origins** once the frontend has a real deploy URL — currently hardcoded to `http://localhost:3000` only ([app.ts:26](src/app.ts#L26)). `credentials: true` already set correctly. (~15 min, whenever frontend gives a URL)
-2. **ComfyUI face-swap endpoint deployment on CLIENT's RunPod account** (~4-8h including build wait) — fork repo to client's org, clean Dockerfile (remove 2509 duplicate downloads, ~20GB), deploy, test, then tune to production config (Active=1, Max=3-5, Idle=90s)
-3. Seed real comic data (~3-4h)
-4. SD worker real implementation — wire ComfyUI endpoint into `sdWorker.ts` (~16-24h)
-5. Sharp text renderer (~8-12h)
-6. Checkout / confirm endpoints (~6-8h)
-7. Razorpay integration (~10-14h)
-8. Paid page generation (~4-6h)
-9. HD upscale ComfyUI deployment (second workflow) (~6-8h)
-10. HD upscale + PDF compilation (~10-14h)
-11. User + admin order endpoints (~6-8h)
-12. Shiprocket integration (~10-14h)
-13. Email notifications (~6-8h)
-14. Publish flow (~6-8h)
-15. Stabilization (~8-10h)
+1. **Update CORS allowed origins** once frontend has a real deploy URL — currently hardcoded to `http://localhost:3000` only (`app.ts:26`). `credentials: true` already set. (~15 min)
+2. **Seed real comic data** (~3–4 h)
+3. **SD worker real implementation** — the big one (~24–32 h combined with Sharp):
+   - Sharp text renderer: load font from R2, read bubble coords + dialogue template, replace `{name}`/`{pronoun_*}` tokens, render SVG text, composite onto `Page.artworkUrl`, upload result to R2 as `textStampedUrl`.
+   - ComfyUI submission: deep-clone `api-workflow.json`, patch nodes 78/435/519/466 + 471 (steps) + 467 (cfg), upload three images, submit to RunPod endpoint `bwdfkrlaocqm3o` with webhook URL, store returned job ID as `comfyJobId`.
+   - RunPod webhook endpoint: receive completed image, decode base64 from `output.images[0].data`, upload to R2 as `finalImageUrl`, update `PageVersion.status = SD_READY`, emit `page:ready` WebSocket event.
+4. Checkout / confirm endpoints (~6–8 h) — `POST /sessions/:id/checkout`, `POST /sessions/:id/confirm`.
+5. Razorpay integration (~10–14 h) — webhook with signature verification, `WebhookEvent` idempotency.
+6. Paid page generation (~4–6 h) — reuse SD pipeline for pages 11–24 with 8-variant cap.
+7. PDF compilation (~6–8 h) — pdf-lib, upload to R2 with 30-day retention, 7-day signed download.
+8. User + admin order endpoints (~6–8 h)
+9. Shiprocket integration (~10–14 h) — auth, order creation, tracking webhook, international routing.
+10. Email notifications (~6–8 h) — provider selection, PDF-ready + tracking-shipped emails.
+11. Publish flow (~6–8 h) — admin one-click publish, `ComicStatus` transition.
+12. Stabilization (~8–10 h) — end-to-end testing, session expiry cleanup, edge cases.
 
-**Total remaining: ~110-150h. At 12h/day: ~10-13 working days.**
+**Total remaining: ~85–115 h. At 12 h/day: ~7–10 working days. At 8–10 h/day: ~10–14 working days.**
 
 ---
 
 ## OPEN QUESTIONS (currently unresolved)
 
-- **Photo validation ownership** — docs/decisions say this moved to frontend MediaPipe.js, but `POST /sessions/:id/photo/validate` still runs the full legacy Python pipeline server-side and still gates `status → PHOTO_UPLOADED` on it. Decide: turn it off now that frontend has its own checks, or keep it as a secondary server-side gate indefinitely?
-- **`https://unilake-backend.onrender.com`** appears in Better Auth `trustedOrigins` ([auth.ts](src/lib/auth.ts)) alongside the Cloud Run URL — confirm whether this is a live secondary deployment or stale leftover before documenting it anywhere as real.
-- **Client-project cost sign-off**: ~$250/month baseline for 1 active RunPod worker — needs client approval before production tuning.
-- **HD upscale workflow**: does it exist yet, or does the client still need to hand it over?
-- **Comic page artwork upload path in production**: node 78's `Reference Body` currently references a test artifact — confirm `Page.artworkUrl` works as the real third `input.images[]` file during first test.
-- Razorpay order ID reuse vs regeneration on payment retry
-- Shiprocket international address fields — customs declaration format; country name vs ISO codes
-- `validateQuery` middleware — not built, deferred
-- WebSocket room map is in-memory → needs Redis pub/sub for multi-instance (accepted, Cloud Run pinned to 1)
-- `PREVIEW_READY` status flipping mechanism — not designed (nothing currently transitions a session out of `GENERATING_PREVIEW`)
-- Whether page generation stages can run ahead of session status
-- Variant generation eagerness strategy
-- Email provider — not chosen
-- International Razorpay — external account setup needed
-- Sharp coordinate scaling from bubble-mapper pixels to output resolution — not designed
-- No signed-download endpoint exists for private-bucket assets (fonts, raw child photos) — if frontend ever needs to preview one directly, nothing serves that today
-- Python cleanup timing — deferred, code retained
+- **Photo validation ownership** — docs/decisions say this moved to frontend MediaPipe.js, but `POST /sessions/:id/photo/validate` still runs the full legacy Python pipeline server-side and still gates `status → PHOTO_UPLOADED` on it. Decide: turn off now, or keep as secondary gate.
+- **`https://unilake-backend.onrender.com`** in Better Auth `trustedOrigins` — confirm live vs stale.
+- **Client-project cost sign-off**: ~$250/month baseline for 1 active RunPod worker (48 GB tier @ $1.22/hr) — needs client approval before flipping Active=0 → Active=1 in production.
+- **retinaface_resnet50 cold-start pre-download** — not baked into Docker image. First request per fresh worker pays 60–120s auto-download from HuggingFace. Currently acceptable; revisit if user-visible latency becomes an issue.
+- **GFPGAN location** — currently at `models/insightface/`. ReActor's expected path may be `models/facerestore_models/`. No error observed in the working end-to-end test but not explicitly confirmed working. If face-restoration quality looks off in real generations, move it.
+- **`PREVIEW_READY` status transition** — nothing currently transitions a session out of `GENERATING_PREVIEW`. Needs designing in SD worker completion logic (last page done → flip session status).
+- **Sharp coordinate scaling** — bubble-mapper pixels (admin drew on browser-rendered image) → output resolution. Not designed.
+- **Sharp variable substitution** — `{name}`, `{pronoun_subject}`, `{pronoun_object}`, `{pronoun_possessive}` mapping from `PronounKey` enum. Need lookup table.
+- **Variant generation eagerness** — do we auto-generate variant 0 for all pages on trigger, or lazy per-request? Current code queues variant 0 only.
+- **BullMQ concurrency alignment** — worker concurrency is 3, must match client's RunPod Max Workers when flipped to production.
+- Razorpay order ID reuse vs regeneration on payment retry.
+- Shiprocket international address fields — customs declaration format; country name vs ISO codes.
+- `validateQuery` middleware — not built, deferred.
+- WebSocket room map is in-memory → needs Redis pub/sub for multi-instance (Cloud Run pinned to 1 for now).
+- Email provider — not chosen.
+- International Razorpay — external account setup needed.
+- No signed-download endpoint for private-bucket assets (fonts, raw child photos).
+- Python cleanup timing — deferred, code retained.
+- **Client comic-metadata cleanup** — the LoadImage nodes in the deployed workflow still reference `Astranaut.png` / `Sunny Kid 1.jpeg` / `Astranaut - Mask.png` as placeholder filenames. Worker code patches these at runtime; ensure the filename-match invariant lands correctly when writing the worker.
 
 ---
 
 ## VERIFY / LOOSE ENDS
 
-- **Not yet manually verified end-to-end** — this session's fixes (response envelope, WS room join, comic thumbnail update, generate/regenerate error codes) were only confirmed via `npx tsc --noEmit`, not a live Apidog run. Do that before trusting them in front of the frontend team.
-- `page.controller.ts`, `bubble.controller.ts`, `font.controller.ts` still call `schema.parse()` a second time on already-`validateBody`-validated `req.body` in their create/upload-url handlers — redundant, low risk, not yet cleaned up despite an earlier (inaccurate) claim that double-validation was fixed project-wide.
-- **RunPod job ID mapping to `comfyPromptId1/2/3`**: field name kept, but semantics shift — stores RunPod job IDs, not ComfyUI native `prompt_id`. Document in code comments when writing `sdWorker.ts`.
-- **BigInt seed → JSON**: `PageVersion.seed` is BigInt; must `Number(seed)` before serializing into workflow. Watch 53-bit precision limit.
+- **Per-page tunables end-to-end test not run** — this session verified via `npx tsc --noEmit` only. Before starting the SD worker, hit PATCH `/api/admin/pages/:pageId` with `steps: 999` and confirm 400. Confirm defaults populate on POST with no fields. (~5 min)
+- **HD code is commented, not deleted** — `queues.ts`, `workers/index.ts`, `hdWorker.ts` still have commented-out HD blocks. Sweep post-launch.
+- **Stray `// pageNumber   Int` comment** in `PageVersion` model in `schema.prisma` — cosmetic, delete when convenient.
+- `page.controller.ts`, `bubble.controller.ts`, `font.controller.ts` still double-validate — low risk, not yet cleaned up.
+- **BigInt seed → JSON**: `PageVersion.seed` is BigInt; must `Number(seed)` before serializing into workflow. Watch 53-bit precision limit. Bake into `sdWorker.ts`.
 - **Filename-match invariant**: `input.images[].name` MUST equal the workflow's LoadImage `inputs.image` string exactly. Bake into worker code as a single variable, not two.
+- **`comfyJobId` semantics**: stores RunPod job ID, not ComfyUI native `prompt_id`. Document in `sdWorker.ts` when writing it.
+- **RunPod response shape reference**: `output.images[0].data` is base64 PNG, `output.images[0].filename` is `ComfyUI_XXXXX_.png`, `output.images[0].type` is `"base64"`. Worker decodes → uploads to R2.
+- **Client-side Dockerfile evolution** — `unilakebooks-web/comfyui-normal-...` repo `main` branch is the working version. Commit log documents: unused 2509 LoRA line commented, custom-node `pip install -r requirements.txt` added, `pip install "onnxruntime-gpu<1.27"` added for CUDA 12 compat.

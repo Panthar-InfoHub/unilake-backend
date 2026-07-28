@@ -16,10 +16,10 @@ import type {
   OrderSession,
   OrderSessionStatus,
 } from "../generated/prisma/client.js";
-import { sdGenerationQueue, hdGenerationQueue } from "../jobs/queues.js";
+import { sdGenerationQueue} from "../jobs/queues.js";
 import {
-  MAX_SD_VARIANTS_PER_PAGE,
-  MAX_HD_VARIANTS_PER_PAGE,
+  MAX_VARIANTS_BEFORE_PAYMENT,
+  MAX_VARIANTS_AFTER_PAYMENT,
 } from "../config/generation.js";
 
 export async function createOrderSession(input: CreateSessionInput, userId?: string) {
@@ -78,7 +78,10 @@ export const getOrderSessionId = async (sessionId: string) => {
     where: { id: sessionId },
     include: {
       pageVersions: {
-        orderBy: [{ variantIndex: "asc" }],// 
+        orderBy: [
+          { page: { pageNumber: "asc" } },
+          { variantIndex: "asc" },
+        ],
       },
     },
   });
@@ -208,14 +211,14 @@ async function enqueuePreviewGenerationJobs(
     orderBy: { pageNumber: "asc" },
   });
 
-  const jobs = previewPages.map((page) => {
-    sdGenerationQueue.add("generate--page", {
+  const jobs = previewPages.map((page) =>
+    sdGenerationQueue.add("generate-page", {
       orderSessionId,
       pageId: page.id,
       pageNumber: page.pageNumber,
       variantIndex: 0,
-    });
-  });
+    })
+  );
 
   await Promise.all(jobs);
   return previewPages.length;
@@ -264,14 +267,17 @@ export async function triggerGeneration(sessionId: string) {
   return { status: "GENERATING_PREVIEW" as const, jobsEnqueued };
 }
 
-const HD_STAGE_STATUSES: OrderSessionStatus[] = [
+const REGENERATABLE_STATUSES: OrderSessionStatus[] = [
+  "GENERATING_PREVIEW",
+  "PREVIEW_READY",
+  "GENERATING_PAID",
+  "PAID_PAGES_READY",
+];
+const POST_PAYMENT_STATUSES: OrderSessionStatus[] = [
+  "PAID",
   "GENERATING_PAID",
   "PAID_PAGES_READY",
   "CONFIRMED",
-];
-const SD_STAGE_STATUSES: OrderSessionStatus[] = [
-  "GENERATING_PREVIEW",
-  "PREVIEW_READY",
 ];
 
 export async function regeneratePage(sessionId: string, pageNumber: number) {
@@ -291,20 +297,18 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
     throw new NotFoundError(`Page ${pageNumber} does not exist for this comic`);
   }
 
-  const isHdStage = HD_STAGE_STATUSES.includes(session.status);
-  const isSdStage = SD_STAGE_STATUSES.includes(session.status);
-
-  if (!isHdStage && !isSdStage) {
+  if (!REGENERATABLE_STATUSES.includes(session.status)) {
     throw new ConflictError(
       `Cannot regenerate — session is not in an active generation stage (current status: ${session.status})`
     );
   }
 
+  const hasPaid = POST_PAYMENT_STATUSES.includes(session.status);
+  const cap = hasPaid ? MAX_VARIANTS_AFTER_PAYMENT : MAX_VARIANTS_BEFORE_PAYMENT;
+
   const existingVariantCount = await prisma.pageVersion.count({
     where: { orderSessionId: sessionId, pageId: page.id },
   });
-
-  const cap = isHdStage ? MAX_HD_VARIANTS_PER_PAGE : MAX_SD_VARIANTS_PER_PAGE;
 
   if (existingVariantCount >= cap) {
     throw new ConflictError(
@@ -312,20 +316,18 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
     );
   }
 
-  const queue = isHdStage ? hdGenerationQueue : sdGenerationQueue;
-
-  await queue.add("generate-page", {
+  await sdGenerationQueue.add("generate-page", {
     orderSessionId: sessionId,
     pageId: page.id,
-    pageNumber, // descriptive only — see note below
+    pageNumber,
     variantIndex: existingVariantCount,
   });
-  
+
   return {
     queued: true,
     pageNumber,
     variantIndex: existingVariantCount,
-    stage: isHdStage ? "HD" : "SD",
+    hasPaid,
   };
 }
 

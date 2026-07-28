@@ -7,10 +7,10 @@ import {
   getAdminComicDetailHandler,
   getComicPricingHandler,
   getLoraUploadUrlHandler,
-  getThumbnailUploadUrlHandler,
   updateComicHandler,
   updateComicPricingHandler,
   updateComicStatusHandler,
+  getThumbnailUploadUrlsBatchHandler,
 } from "../controllers/comic.controller.js";
 import {
   createCountryHandler,
@@ -140,7 +140,8 @@ router.get("/status", (req, res) => {
 // comic routes
 router.get("/comics", getAdminComicsHandler); // get the comic rotues
 router.get("/comics/:comicId", getAdminComicDetailHandler); // single comic full detail
-router.post("/comics/thumbnail/upload-url", getThumbnailUploadUrlHandler); // For uploading the thumbnail of the Comic
+// router.post("/comics/thumbnail/upload-url", getThumbnailUploadUrlHandler); // For uploading the thumbnail of the Comic
+router.post("/comics/thumbnails/upload-urls", getThumbnailUploadUrlsBatchHandler);
 router.post("/comics", validateBody(createComicSchema), createComicHandler); // create comic
 router.delete("/comics/:comicId", deleteComicHandler); // delete comic
 router.patch(

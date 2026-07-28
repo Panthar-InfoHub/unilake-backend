@@ -29,10 +29,10 @@ export const sdGenerationQueue = new Queue("sd-generation", {
  * Queue for processing High Definition (HD) generations.
  * Used for the final, computationally heavy upscaling tasks.
  */
-export const hdGenerationQueue = new Queue("hd-generation", {
-  connection: redisClient,
-  defaultJobOptions,
-});
+// export const hdGenerationQueue = new Queue("hd-generation", {
+//   connection: redisClient,
+//   defaultJobOptions,
+// });
 
 /**
  * Queue for compiling finished generation assets into downloadable PDFs.

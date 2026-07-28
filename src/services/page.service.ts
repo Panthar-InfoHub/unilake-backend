@@ -66,6 +66,8 @@ export async function createPage(comicId: string, input: CreatePageInput) {
   if (input.maskUrl !== undefined) data.maskUrl = input.maskUrl;
   if (input.faceDirection !== undefined) data.faceDirection = input.faceDirection;
   if (input.pagePrompt !== undefined) data.pagePrompt = input.pagePrompt;
+  if (input.steps !== undefined) data.steps = input.steps;
+  if (input.cfg !== undefined) data.cfg = input.cfg;
 
   
   try {
@@ -136,6 +138,8 @@ export async function updatePage(pageId: string, input: UpdatePageInput) {
   if (input.pagePrompt !== undefined) data.pagePrompt = input.pagePrompt;
   if (input.artworkUrl !== undefined) data.artworkUrl = input.artworkUrl;
   if (input.maskUrl !== undefined) data.maskUrl = input.maskUrl;
+  if (input.steps !== undefined) data.steps = input.steps;
+  if (input.cfg !== undefined) data.cfg = input.cfg;
 
   const updated = await prisma.page.update({
     where: { id: pageId },

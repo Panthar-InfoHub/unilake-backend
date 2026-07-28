@@ -1,4 +1,10 @@
 import {z} from "zod"
+import { 
+  MIN_STEPS, 
+  MAX_STEPS, 
+  MIN_CFG, 
+  MAX_CFG 
+} from "../config/generation.js";
 
 
 export const createPageSchema = z.object({
@@ -10,6 +16,8 @@ export const createPageSchema = z.object({
   faceDirection: z.enum(["front", "three-quarter", "side"]).optional(),
   isPreviewPage: z.boolean().default(false),
   pagePrompt: z.string().min(1).optional(),
+  steps: z.number().int().min(MIN_STEPS).max(MAX_STEPS).optional(),
+  cfg: z.number().min(MIN_CFG).max(MAX_CFG).optional(),
 });
 
 export const getPageArtworkUploadUrlSchema = z.object({
@@ -25,6 +33,8 @@ export const updatePageSchema = z.object({
   pagePrompt: z.string().min(1).nullable().optional(),
   artworkUrl: z.string().min(1).optional(),
   maskUrl: z.string().min(1).optional(),
+  steps: z.number().int().min(MIN_STEPS).max(MAX_STEPS).optional(),
+  cfg: z.number().min(MIN_CFG).max(MAX_CFG).optional(),
 }).refine((data) => Object.keys(data).length > 0, {
   message: "At least one field must be provided",
 });
