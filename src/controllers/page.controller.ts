@@ -8,10 +8,12 @@ import {
   listComicPages,
   updatePage,
   deletePage,
+  reorderComicPages,
 } from "../services/page.service.js";
 import {
   createPageSchema,
   getPageArtworkUploadUrlSchema,
+  type ReorderPagesInput,
 } from "../validators/page.schema.js";
 
 export const getPageArtworkUploadUrlHandler = asyncHandler(
@@ -84,5 +86,20 @@ export const deletePageHandler = asyncHandler(
     await deletePage(pageId);
 
     res.status(204).send();
+  }
+);
+
+export const reorderPagesHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { comicId } = req.params;
+
+    if (!comicId || typeof comicId !== "string") {
+      throw new ValidationError("comicId param is required");
+    }
+
+    const { orderedPageIds } = req.body as ReorderPagesInput;
+    const pages = await reorderComicPages(comicId, orderedPageIds);
+
+    sendSuccess(res, 200, pages, "Pages reordered successfully.");
   }
 );

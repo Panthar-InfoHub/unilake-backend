@@ -20,6 +20,27 @@ import type {
 import type { Prisma } from "../generated/prisma/client.js";
 import type { UpdateComicInput } from "../validators/comic.schema.js";
 
+/**
+ * Accepts either a raw R2 key or a full public URL and always returns a key.
+ *
+ * Thumbnails are the only asset stored as an ARRAY, which means updating them
+ * requires the client to re-send the entries it wants to KEEP. Those come back
+ * from GET as full URLs, so tolerating both forms here lets the frontend send
+ * exactly what it received (minus whatever it is deleting) instead of having to
+ * know R2_PUBLIC_URL_BASE and reverse the conversion itself — a mismatch there
+ * would silently produce doubled URLs.
+ *
+ * Kept local deliberately. r2.getKeyFromPublicUrl() is reserved for the SD
+ * worker: it assumes its input is always a URL, whereas this one handles
+ * untrusted client input that may legitimately be either form.
+ */
+const normalizeThumbnailInput = (input: string): string => {
+  const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+  const prefix = `${publicBase}/`;
+
+  return input.startsWith(prefix) ? input.slice(prefix.length) : input;
+};
+
 export const generateThumbnailUploadUrl = async (
   fileName: string,
   contentType: string
@@ -46,7 +67,11 @@ export const createComic = async (data: CreateComicInput) => {
     );
 
     const { thumbnailKeys, pricing, loraKey, ...restData } = data;
-    const coverThumbnailUrls = thumbnailKeys.map(getPublicUrl);
+    // Create only ever receives fresh keys today, but normalizing here keeps
+    // create and update behaving identically for any future caller.
+    const coverThumbnailUrls = thumbnailKeys.map((entry) =>
+      getPublicUrl(normalizeThumbnailInput(entry))
+    );
 
     const newComic = await prisma.$transaction(async (tx) => {
       const comic = await tx.comic.create({
@@ -106,7 +131,12 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     if (data.loraStrength !== undefined) updateData.loraStrength = data.loraStrength;
     if (data.loraKey !== undefined) updateData.loraFileUrl = data.loraKey;
     if (data.thumbnailKeys !== undefined) {
-      const newUrls = data.thumbnailKeys.map(getPublicUrl);
+      // Entries may arrive as freshly-uploaded keys OR as URLs the client is
+      // re-sending to keep. Normalizing both to keys first means the diff below
+      // compares like with like, so a kept thumbnail is never seen as removed.
+      const newUrls = data.thumbnailKeys.map((entry) =>
+        getPublicUrl(normalizeThumbnailInput(entry))
+      );
       updateData.coverThumbnailUrls = newUrls;
 
       const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
@@ -151,6 +181,9 @@ export async function deleteComic(comicId: string) {
   const comic = await prisma.comic.findUnique({
     where: { id: comicId },
     include: {
+      pages: {
+        select: { artworkUrl: true, maskUrl: true },
+      },
       _count: {
         select: { orderSessions: true },
       },
@@ -183,9 +216,10 @@ export async function deleteComic(comicId: string) {
     );
   }
 
+  const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+
   // Best-effort R2 cleanup for all thumbnails before DB delete
   if (comic.coverThumbnailUrls.length > 0) {
-    const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
     for (const url of comic.coverThumbnailUrls) {
       const key = url.replace(`${publicBase}/`, "");
       try {
@@ -194,6 +228,22 @@ export async function deleteComic(comicId: string) {
       } catch (error) {
         logger.warn({ error, comicId, key }, "Failed to delete comic thumbnail from R2");
       }
+    }
+  }
+
+  // Pages cascade-delete in the DB, but their R2 assets do not — clean them up
+  // here or every deleted comic leaves orphaned, permanently public artwork.
+  const pageAssetUrls = comic.pages.flatMap((p) =>
+    [p.artworkUrl, p.maskUrl].filter((url): url is string => Boolean(url))
+  );
+
+  for (const url of pageAssetUrls) {
+    const key = url.replace(`${publicBase}/`, "");
+    try {
+      await deleteFile("public", key);
+      logger.info({ comicId, key }, "Deleted page asset from R2");
+    } catch (error) {
+      logger.warn({ error, comicId, key }, "Failed to delete page asset from R2");
     }
   }
 
@@ -441,6 +491,10 @@ export const getPublicComicDetails = async (comicId: string) => {
           id: true,
           pageNumber: true,
           artworkUrl: true,
+          // Lets the frontend reserve the correct aspect-ratio box before the
+          // preview image loads, avoiding layout shift in the carousel.
+          artworkWidth: true,
+          artworkHeight: true,
         },
       },
     },

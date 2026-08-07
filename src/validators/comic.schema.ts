@@ -99,9 +99,15 @@ export const updateComicSchema = z
     freePreviewPages: z.number().int().positive().optional(),
     loraStrength: z.number().min(0).max(2).optional(),
     loraKey: z.string().min(1).optional(),
+    // Entries may be freshly-uploaded R2 keys or URLs the client is re-sending
+    // to keep. The service normalizes both. min(1) is what prevents an admin
+    // from removing the final thumbnail.
     thumbnailKeys: z
       .array(z.string().min(1))
-      .min(1, "At least one thumbnail is required")
+      .min(
+        1,
+        "A comic must have at least one thumbnail — you cannot remove the last one"
+      )
       .max(10, "Maximum 10 thumbnails per comic")
       .optional(),
     description: z.string().min(1).optional(),
@@ -134,7 +140,6 @@ export const uploadThumbnailsBatchSchema = z.object({
     .max(10, "Maximum 10 thumbnails per request"),
 });
 
-
 export const adminComicFilterQuerySchema = z.object({
   gender: z.enum(["BOY", "GIRL", "UNISEX"]).optional(),
   ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
@@ -151,7 +156,9 @@ export type GetLoraUploadUrlInput = z.infer<typeof getLoraUploadUrlSchema>;
 export type AdminComicFilterQueryInput = z.infer<
   typeof adminComicFilterQuerySchema
 >;
-export type UploadThumbnailsBatchInput = z.infer<typeof uploadThumbnailsBatchSchema>;
+export type UploadThumbnailsBatchInput = z.infer<
+  typeof uploadThumbnailsBatchSchema
+>;
 
 // export const updateComicSchema = createComicSchema.partial();
 // export type UpdateComicInput = z.infer<typeof updateComicSchema>;

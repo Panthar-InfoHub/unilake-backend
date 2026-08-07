@@ -6,7 +6,7 @@ import {
   createPhotoUploadUrl,
   getOrderSessionId,
   updateOrderSession,
-  validateSessionPhoto,
+  confirmSessionPhoto,
   triggerGeneration,
   regeneratePage,
   attachUserToSession,
@@ -73,14 +73,14 @@ export const createPhotoUploadUrlHandler = asyncHandler(async (req, res) => {
   sendSuccess(res, 200, result);
 });
 
-export const validateSessionPhotoHandler = asyncHandler(async (req, res) => {
+export const confirmSessionPhotoHandler = asyncHandler(async (req, res) => {
   const { sessionId } = req.params;
   if (!sessionId || typeof sessionId !== "string") {
     throw new ValidationError("sessionId param is required");
   }
 
   const { key } = req.body;
-  const result = await validateSessionPhoto(sessionId, key);
+  const result = await confirmSessionPhoto(sessionId, key);
 
   sendSuccess(res, 200, result);
 });

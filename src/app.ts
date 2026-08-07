@@ -12,6 +12,9 @@ import publicRouter from "./routes/public.js";
 import userRouter from "./routes/user.js";
 import { requireLoggedIn } from "./middlewares/requireLoggedIn.js";
 
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
 
 const app = express();
 app.set("trust proxy", 1);

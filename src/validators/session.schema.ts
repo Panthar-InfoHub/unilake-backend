@@ -29,12 +29,12 @@ export const photoUploadUrlSchema = z.object({
   }),
 });
 
-export const photoValidateSchema = z.object({
+export const photoConfirmSchema  = z.object({
   key: z.string({ message: "Upload key is required." }).min(1, "Upload key cannot be empty."),
 });
 
 
-export type PhotoValidateInput = z.infer<typeof photoValidateSchema>;
+export type PhotoConfirmInput = z.infer<typeof photoConfirmSchema>;;
 export type PhotoUploadUrlInput = z.infer<typeof photoUploadUrlSchema>;
 export type UpdateSessionInput = z.infer<typeof updateSessionSchema>;
 export type CreateSessionInput = z.infer<typeof createSessionSchema>;

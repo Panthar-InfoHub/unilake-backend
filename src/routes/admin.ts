@@ -31,6 +31,7 @@ import {
   createPageSchema,
   getPageArtworkUploadUrlSchema,
   updatePageSchema,
+  reorderPagesSchema
 } from "../validators/page.schema.js";
 import {
   createPageHandler,
@@ -38,6 +39,7 @@ import {
   listComicPagesHandler,
   updatePageHandler,
   deletePageHandler,
+  reorderPagesHandler
 } from "../controllers/page.controller.js";
 import {
   createBubbleSchema,
@@ -179,6 +181,12 @@ router.patch(
   updatePageHandler
 ); // update page config
 router.delete("/pages/:pageId", deletePageHandler); // delete page (cascades bubbles)
+
+router.patch(
+  "/comics/:comicId/pages/reorder",
+  validateBody(reorderPagesSchema),
+  reorderPagesHandler
+); // reorder pages — send ALL page IDs in desired order
 
 // BUBBLES
 router.get("/pages/:pageId/bubbles", listPageBubblesHandler); // list all bubbles for a page with font info

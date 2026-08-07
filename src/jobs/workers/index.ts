@@ -1,7 +1,7 @@
 import { logger } from "../../lib/logger.js";
 // import { hdWorker } from "./hdWorker.js";
 import { pdfWorker } from "./pdfWorker.js";
-import { sdWorker } from "./sdWorker.js";
+import { generationWorker } from "./generationWorker.js";
 
 /**
  * Initializes all background workers and registers graceful shutdown handlers.
@@ -10,7 +10,7 @@ export const initJobs = () => {
   logger.info("Initializing background job workers...");
 
   // Instantiate/activate the workers by referencing them
-  const workers = [sdWorker, pdfWorker];
+  const workers = [generationWorker, pdfWorker];
 
   logger.info(`All ${workers.length} workers are actively listening to their respective queues.`);
 

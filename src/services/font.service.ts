@@ -8,6 +8,7 @@ import type {
   UpdateFontInput,
 } from "../validators/font.schema.js";
 
+
 const FONT_UPLOAD_EXPIRY_SECONDS = 10 * 60;
 
 const FONT_CONTENT_TYPE_MAP: Record<string, string> = {

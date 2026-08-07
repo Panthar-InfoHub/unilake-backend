@@ -22,5 +22,5 @@ redisClient.on("ready", () => {
 })
 
 redisClient.on("error", (error) => {
-    logger.error({err: error}, "Upstash Redis connection error")
+    logger.error({err: error}, "Redis connection error")
 })

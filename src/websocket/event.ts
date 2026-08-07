@@ -13,7 +13,7 @@ export function emitPageReady(
   const sockets = getRoom(sessionId);
 
   if (!sockets) {
-    logger.info(
+    logger.debug(
       { sessionId },
       "EmitPageReady : No sockets is connected, skipping"
     );
@@ -40,11 +40,31 @@ export function emitPageError(
   const sockets = getRoom(sessionId);
 
   if (!sockets) {
-    logger.info({ sessionId }, "emitPageError: no sockets connected, skipping");
+    logger.debug({ sessionId }, "emitPageError: no sockets connected, skipping");
     return;
   }
 
   const message = JSON.stringify({ type: "page:error", ...payload });
+
+  for (const ws of sockets) {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(message);
+    }
+  }
+}
+
+export function emitSessionPreviewReady(sessionId: string) {
+  const sockets = getRoom(sessionId);
+
+  if (!sockets) {
+    logger.debug(
+      { sessionId },
+      "emitSessionPreviewReady: no sockets connected, skipping",
+    );
+    return;
+  }
+
+  const message = JSON.stringify({ type: "session:preview-ready" });
 
   for (const ws of sockets) {
     if (ws.readyState === ws.OPEN) {

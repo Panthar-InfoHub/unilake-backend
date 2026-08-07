@@ -13,18 +13,18 @@ datasource db {
 }
 
 model User {
-  id            String    @id
-  name          String
-  email         String
-  emailVerified Boolean   @default(false)
-  image         String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  sessions      Session[]
-  accounts      Account[]
-  orderSessions OrderSession[]
+  id             String         @id
+  name           String
+  email          String
+  emailVerified  Boolean        @default(false)
+  image          String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  sessions       Session[]
+  accounts       Account[]
+  orderSessions  OrderSession[]
   savedAddresses SavedAddress[]
-  role          String    @default("USER")
+  role           String         @default("USER")
 
   @@unique([email])
   @@map("user")
@@ -93,6 +93,7 @@ enum CoverType {
   HARDCOVER
   SOFTCOVER
 }
+
 enum GenderTag {
   BOY
   GIRL
@@ -119,17 +120,17 @@ model Theme {
 }
 
 model Comic {
-  id                String      @id @default(uuid())
-  title             String
-  genderTag         GenderTag
-  pageCount         Int
-  freePreviewPages  Int
-  coverThumbnailUrls String[] @default([])
-  loraFileUrl       String?
-  loraStrength      Float       @default(1.0)
-  status            ComicStatus @default(DRAFT)
-  publishJobId      String?
-  publishError      String?
+  id                 String      @id @default(uuid())
+  title              String
+  genderTag          GenderTag
+  pageCount          Int
+  freePreviewPages   Int
+  coverThumbnailUrls String[]    @default([])
+  loraFileUrl        String?
+  loraStrength       Float       @default(1.0)
+  status             ComicStatus @default(DRAFT)
+  publishJobId       String?
+  publishError       String?
 
   pages         Page[]
   fonts         Font[]
@@ -155,8 +156,15 @@ model Page {
   comic   Comic  @relation(fields: [comicId], references: [id], onDelete: Cascade)
 
   pageNumber Int // 1–24
-  artworkUrl String? // HD PNG, empty bubbles, R2 path
-  maskUrl    String? // PNG marking head area, R2 path
+  artworkUrl String? // HD PNG, empty bubbles, R2 public URL
+  maskUrl    String? // PNG marking head area, R2 public URL
+
+  // Real pixel size of artworkUrl, probed server-side with Sharp at upload time.
+  // Null until artwork is attached. Used to (a) reject a mask whose size doesn't
+  // match, (b) warn when a replaced artwork changes aspect ratio, (c) show the
+  // size in the admin UI. NOT needed to position bubbles — those are normalized.
+  artworkWidth  Int?
+  artworkHeight Int?
 
   hasFace       Boolean @default(false) // does the child's face appear on this page
   mirrorFace    Boolean @default(false) // should the face be flipped
@@ -181,7 +189,12 @@ model Bubble {
   pageId String
   page   Page   @relation(fields: [pageId], references: [id], onDelete: Cascade)
 
-  x      Float // coordinates captured from drag-rectangle in admin UI
+  // Normalized 0–1 fractions of the artwork's dimensions — NOT pixels.
+  // x/y is the top-left corner. Constraints (enforced in Zod + bubble.service):
+  //   0 <= x, y            x + width <= 1        y + height <= 1
+  // Resolution-independent by design: artwork can be re-uploaded at any size
+  // without invalidating existing bubbles.
+  x      Float
   y      Float
   width  Float
   height Float
@@ -189,7 +202,10 @@ model Bubble {
   dialogue String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
   fontId   String?
   font     Font?   @relation(fields: [fontId], references: [id])
-  fontSize Int     @default(24)
+  // Normalized fraction of the artwork's HEIGHT, not pixels.
+  // Rendered size = fontSize * artworkHeight.
+  // Default 0.02 ≈ 31px on a 1536px-tall page.
+  fontSize Float   @default(0.02)
 
   sortOrder Int @default(0) // order bubbles were added, for predictable rendering/debugging
 
@@ -223,9 +239,9 @@ model PricingRule {
   comic   Comic  @relation(fields: [comicId], references: [id], onDelete: Cascade)
 
   countryId String
-  country   Country @relation(fields: [countryId], references: [id])
+  country   Country   @relation(fields: [countryId], references: [id])
   coverType CoverType
-  price     Decimal @db.Decimal(10, 2)
+  price     Decimal   @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -272,12 +288,12 @@ model OrderSession {
   userId String?
   user   User?   @relation(fields: [userId], references: [id])
 
-  childName  String?
-  pronounKey PronounKey?
+  childName         String?
+  pronounKey        PronounKey?
   notificationEmail String?
   coverType         CoverType?
-  age        Int?
-  status     OrderSessionStatus @default(CREATED)
+  age               Int?
+  status            OrderSessionStatus @default(CREATED)
 
   // Photo validation
   rawPhotoUrls   String[] // up to 2 uploaded photos, R2 paths
@@ -331,9 +347,9 @@ model PageVersion {
   variantIndex Int     @default(0) // 0,1,2... up to 3-4 free / 8 paid
   seed         BigInt? // ComfyUI seed used, stored for reproducibility
 
-  textStampedUrl String?  // Sharp output — artwork with text stamped, INPUT to ComfyUI
-  comfyJobId     String?  // RunPod job ID for the face-swap job
-  finalImageUrl  String?  // ComfyUI output — face-swapped + text-stamped, shown to user & used in PDF
+  textStampedUrl String? // Sharp output — artwork with text stamped, INPUT to ComfyUI
+  comfyJobId     String? // RunPod job ID for the face-swap job
+  finalImageUrl  String? // ComfyUI output — face-swapped + text-stamped, shown to user & used in PDF
 
   isSelected   Boolean           @default(false) // chosen by user at confirm step
   status       PageVersionStatus @default(QUEUED)
@@ -369,13 +385,12 @@ model Order {
   orderSessionId String       @unique
   orderSession   OrderSession @relation(fields: [orderSessionId], references: [id])
 
-  amount      Decimal @db.Decimal(10, 2)
+  amount      Decimal   @db.Decimal(10, 2)
   currency    String
   countryCode String // snapshot of country used for pricing lookup at order time
-  coverType   CoverType 
+  coverType   CoverType
 
-  notificationEmail String? 
-
+  notificationEmail String?
 
   // Shipping address snapshot — copied from OrderSession at order creation, never changes
   shippingName    String?
@@ -411,7 +426,6 @@ model Order {
 
   @@map("orders")
 }
-
 
 model SavedAddress {
   id     String @id @default(uuid())

@@ -72,6 +72,24 @@ export const getPublicUrl = (key: string): string => {
 };
 
 /**
+ * Extracts the R2 object key back out of a stored public URL.
+ * The exact inverse of getPublicUrl().
+ *
+ * NOTE: intentionally has no callers yet. This exists for the SD worker, which
+ * reads `Page.artworkUrl` / `Page.maskUrl` (stored as full public URLs) but needs
+ * the raw key to download the file via downloadFileToLocalPath(). Do NOT delete
+ * as dead code.
+ *
+ * @param url - A full public URL previously produced by getPublicUrl()
+ * @returns The object key inside the public bucket
+ */
+export const getKeyFromPublicUrl = (url: string): string => {
+  const cleanBase = config.r2.publicUrlBase.replace(/\/$/, "");
+
+  return url.replace(`${cleanBase}/`, "");
+};
+
+/**
  * Generates a temporary, cryptographically signed URL for reading or downloading
  * an asset from the private bucket.
  * * @param key - The unique file path/name inside the private bucket
@@ -168,6 +186,38 @@ export const deleteFile = async (
 };
 
 
+
+/**
+ * Downloads an object from R2 straight into an in-memory Buffer.
+ *
+ * Preferred over downloadFileToLocalPath() when the bytes are only needed
+ * transiently (e.g. probing image dimensions with Sharp) — avoids a temp file
+ * write/read/cleanup cycle.
+ *
+ * @param bucket - Targets either the 'public' or 'private' bucket from config
+ * @param key - The object key inside that bucket
+ * @returns The object's raw bytes
+ */
+export const downloadFileToBuffer = async (
+  bucket: "public" | "private",
+  key: string
+): Promise<Buffer> => {
+  const targetBucketName =
+    bucket === "public" ? config.r2.publicBucket : config.r2.privateBucket;
+
+  logger.debug(
+    { bucket: targetBucketName, key },
+    "Downloading object from Cloudflare R2 into memory"
+  );
+
+  const response = await r2Client.send(
+    new GetObjectCommand({ Bucket: targetBucketName, Key: key })
+  );
+
+  const bodyBytes = await response.Body!.transformToByteArray();
+
+  return Buffer.from(bodyBytes);
+};
 
 export async function downloadFileToLocalPath(
   bucket: string,

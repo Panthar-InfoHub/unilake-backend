@@ -1,5 +1,10 @@
 import { prisma } from "../lib/prisma.js";
-import { NotFoundError, ConflictError } from "../utils/errors.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ValidationError,
+} from "../utils/errors.js";
+import { BUBBLE_BOUND_EPSILON } from "../config/generation.js";
 import { logger } from "../lib/logger.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import type { CreateBubbleInput, UpdateBubbleInput  } from "../validators/bubble.schema.js";
@@ -112,6 +117,28 @@ export async function updateBubble(bubbleId: string, input: UpdateBubbleInput) {
     } else {
       data.font = { connect: { id: input.fontId } };
     }
+  }
+
+  // The bounds cross-check can't live in Zod for a partial update — a body
+  // containing only `x` gives Zod no `width` to add it to. Merge the incoming
+  // values over the stored ones and validate the resulting rectangle.
+  const merged = {
+    x: input.x ?? bubble.x,
+    y: input.y ?? bubble.y,
+    width: input.width ?? bubble.width,
+    height: input.height ?? bubble.height,
+  };
+
+  if (merged.x + merged.width > 1 + BUBBLE_BOUND_EPSILON) {
+    throw new ValidationError(
+      "Bubble extends past the right edge of the artwork"
+    );
+  }
+
+  if (merged.y + merged.height > 1 + BUBBLE_BOUND_EPSILON) {
+    throw new ValidationError(
+      "Bubble extends past the bottom edge of the artwork"
+    );
   }
 
   const updated = await prisma.bubble.update({

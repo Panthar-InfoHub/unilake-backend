@@ -1,6 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
-import { getSignedUploadUrl } from "../lib/r2.js";
-import { NotFoundError, ConflictError } from "../utils/errors.js";
+import {
+  deleteFile,
+  downloadFileToBuffer,
+  getPublicUrl,
+  getSignedUploadUrl,
+} from "../lib/r2.js";
+import { probeImageDimensions, type ImageDimensions } from "../lib/image.js";
+import { config } from "../config/env.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ValidationError,
+} from "../utils/errors.js";
 import { logger } from "../lib/logger.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import type {
@@ -10,6 +22,60 @@ import type {
 } from "../validators/page.schema.js";
 
 const PAGE_ASSET_UPLOAD_EXPIRY_SECONDS = 15 * 60;
+
+// Two artworks are treated as the same shape if their width/height ratios agree
+// to within this tolerance. Never compare ratios with === — 2048/1536 and
+// 4096/3072 are both 1.333... but not bit-identical.
+const ASPECT_RATIO_TOLERANCE = 0.01;
+
+const keyFromPublicUrl = (url: string): string => {
+  const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+  return url.replace(`${publicBase}/`, "");
+};
+
+/**
+ * Fetches a page asset from the public bucket and reads its pixel dimensions.
+ * A download failure here almost always means the client called POST/PATCH
+ * before its R2 upload finished, so it surfaces as a 400 rather than a 500.
+ */
+async function probePageAsset(
+  key: string,
+  label: "artwork" | "mask"
+): Promise<ImageDimensions> {
+  let buffer: Buffer;
+
+  try {
+    buffer = await downloadFileToBuffer("public", key);
+  } catch (error) {
+    logger.warn({ error, key, label }, "Failed to download page asset from R2");
+    throw new ValidationError(
+      `The ${label} could not be read from storage. Confirm the file upload completed before saving the page.`
+    );
+  }
+
+  return probeImageDimensions(buffer, label);
+}
+
+function assertMaskMatchesArtwork(
+  mask: ImageDimensions,
+  artwork: ImageDimensions
+): void {
+  if (mask.width === artwork.width && mask.height === artwork.height) return;
+
+  throw new ValidationError(
+    `Mask dimensions (${mask.width}x${mask.height}) must match artwork dimensions (${artwork.width}x${artwork.height}).`
+  );
+}
+
+function aspectRatioChanged(
+  before: ImageDimensions,
+  after: ImageDimensions
+): boolean {
+  const beforeRatio = before.width / before.height;
+  const afterRatio = after.width / after.height;
+
+  return Math.abs(beforeRatio - afterRatio) > ASPECT_RATIO_TOLERANCE;
+}
 
 export async function getPageArtworkUploadUrl(
   comicId: string,
@@ -34,11 +100,13 @@ export async function getPageArtworkUploadUrl(
 
   const contentType = contentTypeMap[fileExtension];
   const folder = fileType === "masks" ? "masks" : "artwork";
+  // randomUUID prevents two upload-url requests in the same millisecond from
+  // generating the same key and silently overwriting each other's file.
   const key =
-    `comics/${comicId}/pages/${folder}/${Date.now()}.${fileExtension}`;
+    `comics/${comicId}/pages/${folder}/${randomUUID()}-${Date.now()}.${fileExtension}`;
 
   const uploadUrl = await getSignedUploadUrl(
-    "private",
+    "public",
     key,
     contentType!,
     PAGE_ASSET_UPLOAD_EXPIRY_SECONDS
@@ -62,21 +130,41 @@ export async function createPage(comicId: string, input: CreatePageInput) {
     isPreviewPage: input.isPreviewPage,
   };
 
-  if (input.artworkUrl !== undefined) data.artworkUrl = input.artworkUrl;
-  if (input.maskUrl !== undefined) data.maskUrl = input.maskUrl;
+  // Frontend sends the R2 key returned by getPageArtworkUploadUrl; we store the
+  // resolved public URL so it is directly renderable by admin + public clients.
+  if (input.artworkUrl !== undefined)
+    data.artworkUrl = getPublicUrl(input.artworkUrl);
+  if (input.maskUrl !== undefined) data.maskUrl = getPublicUrl(input.maskUrl);
   if (input.faceDirection !== undefined) data.faceDirection = input.faceDirection;
   if (input.pagePrompt !== undefined) data.pagePrompt = input.pagePrompt;
   if (input.steps !== undefined) data.steps = input.steps;
   if (input.cfg !== undefined) data.cfg = input.cfg;
 
-  
+  // Artwork dimensions are derived server-side, never accepted from the client.
+  let artworkDimensions: ImageDimensions | null = null;
+
+  if (input.artworkUrl !== undefined) {
+    artworkDimensions = await probePageAsset(input.artworkUrl, "artwork");
+    data.artworkWidth = artworkDimensions.width;
+    data.artworkHeight = artworkDimensions.height;
+  }
+
+  // ComfyUI overlays mask and artwork pixel-for-pixel, so a size mismatch puts
+  // the face in the wrong place on every copy. Reject it at upload time.
+  // A mask supplied without artwork can't be checked yet — it gets validated in
+  // updatePage() when artwork is eventually attached.
+  if (input.maskUrl !== undefined && artworkDimensions) {
+    const maskDimensions = await probePageAsset(input.maskUrl, "mask");
+    assertMaskMatchesArtwork(maskDimensions, artworkDimensions);
+  }
+
   try {
     const page = await prisma.page.create({ data });
     logger.info(
       { comicId, pageId: page.id, pageNumber: page.pageNumber },
       "Page created successfully"
     );
-    return page;
+    return { ...page, warnings: [] as string[] };
   } catch (error: any) {
     if (error.code === "P2002") {
       throw new ConflictError(
@@ -131,27 +219,111 @@ export async function updatePage(pageId: string, input: UpdatePageInput) {
   }
 
   const data: Prisma.PageUpdateInput = {};
+  const oldR2KeysToDelete: string[] = [];
+  const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+
   if (input.hasFace !== undefined) data.hasFace = input.hasFace;
   if (input.mirrorFace !== undefined) data.mirrorFace = input.mirrorFace;
   if (input.faceDirection !== undefined) data.faceDirection = input.faceDirection;
   if (input.isPreviewPage !== undefined) data.isPreviewPage = input.isPreviewPage;
   if (input.pagePrompt !== undefined) data.pagePrompt = input.pagePrompt;
-  if (input.artworkUrl !== undefined) data.artworkUrl = input.artworkUrl;
-  if (input.maskUrl !== undefined) data.maskUrl = input.maskUrl;
+
+  // Artwork / mask arrive as R2 keys and are stored as resolved public URLs.
+  // When an asset is genuinely replaced, queue the old file for R2 cleanup.
+  // Guard on `oldUrl !== newUrl` so re-submitting the same key does not delete
+  // the file the page still points at.
+  if (input.artworkUrl !== undefined) {
+    const newArtworkUrl = getPublicUrl(input.artworkUrl);
+    data.artworkUrl = newArtworkUrl;
+
+    if (page.artworkUrl && page.artworkUrl !== newArtworkUrl) {
+      oldR2KeysToDelete.push(page.artworkUrl.replace(`${publicBase}/`, ""));
+    }
+  }
+
+  if (input.maskUrl !== undefined) {
+    const newMaskUrl = getPublicUrl(input.maskUrl);
+    data.maskUrl = newMaskUrl;
+
+    if (page.maskUrl && page.maskUrl !== newMaskUrl) {
+      oldR2KeysToDelete.push(page.maskUrl.replace(`${publicBase}/`, ""));
+    }
+  }
+
   if (input.steps !== undefined) data.steps = input.steps;
   if (input.cfg !== undefined) data.cfg = input.cfg;
+
+  // ---- Dimension handling -------------------------------------------------
+  // Validation runs against the page's RESULTING state, not just the incoming
+  // fields. Replacing only the artwork can invalidate a mask that wasn't in the
+  // payload at all, so an untouched mask still has to be re-checked.
+  const warnings: string[] = [];
+  const artworkChanged =
+    input.artworkUrl !== undefined && data.artworkUrl !== page.artworkUrl;
+
+  let resultingArtwork: ImageDimensions | null =
+    page.artworkWidth && page.artworkHeight
+      ? { width: page.artworkWidth, height: page.artworkHeight }
+      : null;
+
+  if (artworkChanged) {
+    const previousArtwork = resultingArtwork;
+
+    resultingArtwork = await probePageAsset(input.artworkUrl!, "artwork");
+    data.artworkWidth = resultingArtwork.width;
+    data.artworkHeight = resultingArtwork.height;
+
+    // A pure resolution change is harmless — bubble coords are normalized.
+    // Only a changed aspect ratio actually distorts placement, so only warn
+    // for that. Never blocks the update.
+    if (previousArtwork && aspectRatioChanged(previousArtwork, resultingArtwork)) {
+      warnings.push(
+        `Artwork aspect ratio changed from ${previousArtwork.width}x${previousArtwork.height} to ${resultingArtwork.width}x${resultingArtwork.height}. Re-check bubble positions on this page.`
+      );
+    }
+  }
+
+  // Decide which mask needs checking:
+  //   - a newly supplied mask, or
+  //   - the existing mask, when the artwork underneath it just changed.
+  // A PATCH that touches neither asset performs zero R2 downloads.
+  let maskKeyToVerify: string | null = null;
+
+  if (input.maskUrl !== undefined) {
+    maskKeyToVerify = input.maskUrl;
+  } else if (artworkChanged && page.maskUrl) {
+    maskKeyToVerify = keyFromPublicUrl(page.maskUrl);
+  }
+
+  if (maskKeyToVerify && resultingArtwork) {
+    const maskDimensions = await probePageAsset(maskKeyToVerify, "mask");
+    assertMaskMatchesArtwork(maskDimensions, resultingArtwork);
+  }
 
   const updated = await prisma.page.update({
     where: { id: pageId },
     data,
   });
 
+  // Best-effort cleanup — the DB update must stand even if R2 is unreachable.
+  for (const oldR2Key of oldR2KeysToDelete) {
+    try {
+      await deleteFile("public", oldR2Key);
+      logger.info({ pageId, oldR2Key }, "Old page asset deleted from R2");
+    } catch (error) {
+      logger.warn(
+        { error, pageId, oldR2Key },
+        "Failed to delete old page asset from R2"
+      );
+    }
+  }
+
   logger.info(
-    { pageId, comicId: page.comicId, fields: Object.keys(data) },
+    { pageId, comicId: page.comicId, fields: Object.keys(data), warnings },
     "Page updated"
   );
 
-  return updated;
+  return { ...updated, warnings };
 }
 
 export async function deletePage(pageId: string) {
@@ -163,6 +335,23 @@ export async function deletePage(pageId: string) {
     throw new NotFoundError("Page not found");
   }
 
+  // Best-effort R2 cleanup of the page's public assets before the DB delete.
+  // Skipped silently for pages that never had artwork/mask attached.
+  const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+  const assetUrls = [page.artworkUrl, page.maskUrl].filter(
+    (url): url is string => Boolean(url)
+  );
+
+  for (const url of assetUrls) {
+    const key = url.replace(`${publicBase}/`, "");
+    try {
+      await deleteFile("public", key);
+      logger.info({ pageId, key }, "Deleted page asset from R2");
+    } catch (error) {
+      logger.warn({ error, pageId, key }, "Failed to delete page asset from R2");
+    }
+  }
+
   await prisma.page.delete({
     where: { id: pageId },
   });
@@ -171,4 +360,89 @@ export async function deletePage(pageId: string) {
     { pageId, comicId: page.comicId, pageNumber: page.pageNumber },
     "Page deleted (bubbles cascade-deleted)"
   );
+}
+
+
+export async function reorderComicPages(
+  comicId: string,
+  orderedPageIds: string[]
+) {
+  const comic = await prisma.comic.findUnique({
+    where: { id: comicId },
+    select: { id: true, status: true },
+  });
+
+  if (!comic) {
+    throw new NotFoundError("Comic not found");
+  }
+
+  // Reordering a live comic changes the page order customers are browsing.
+  if (comic.status === "PUBLISHED") {
+    throw new ConflictError(
+      "Cannot reorder pages of a published comic. Unpublish it first."
+    );
+  }
+
+  // Unpublishing does NOT cancel in-flight sessions, and PDF compilation
+  // orders pages by pageNumber — reordering mid-order would reshuffle a book
+  // someone already paid for. Same guard deleteComic uses.
+  const activeSessionCount = await prisma.orderSession.count({
+    where: {
+      comicId,
+      status: { notIn: ["COMPLETED", "FAILED"] },
+    },
+  });
+
+  if (activeSessionCount > 0) {
+    throw new ConflictError(
+      `Cannot reorder pages — this comic has ${activeSessionCount} active order session(s). Wait for them to complete or fail first.`
+    );
+  }
+
+  const pages = await prisma.page.findMany({
+    where: { comicId },
+    select: { id: true },
+  });
+
+  // A partial list would renumber a subset into 1..n and collide with the
+  // pages left untouched. The full set is mandatory.
+  if (pages.length !== orderedPageIds.length) {
+    throw new ValidationError(
+      `orderedPageIds must contain all ${pages.length} page(s) of this comic — received ${orderedPageIds.length}.`
+    );
+  }
+
+  const existingIds = new Set(pages.map((p) => p.id));
+  const foreignIds = orderedPageIds.filter((id) => !existingIds.has(id));
+
+  if (foreignIds.length > 0) {
+    throw new ValidationError(
+      `These page IDs do not belong to this comic: ${foreignIds.join(", ")}`
+    );
+  }
+
+  // Two-phase renumber. @@unique([comicId, pageNumber]) is enforced per
+  // statement (Prisma's unique constraints are not deferrable), so writing
+  // final numbers directly fails the moment two pages swap. Park everything
+  // on negatives first — createPageSchema enforces positive(), so no real
+  // page can ever hold one.
+  await prisma.$transaction(async (tx) => {
+    for (const [index, id] of orderedPageIds.entries()) {
+      await tx.page.update({
+        where: { id },
+        data: { pageNumber: -(index + 1) },
+      });
+    }
+
+    for (const [index, id] of orderedPageIds.entries()) {
+      await tx.page.update({
+        where: { id },
+        data: { pageNumber: index + 1 },
+      });
+    }
+  });
+
+  logger.info({ comicId, orderedPageIds }, "Comic pages reordered");
+
+  return listComicPages(comicId);
 }

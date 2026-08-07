@@ -19,6 +19,8 @@ const requriedVariables = [
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
   "BETTER_AUTH_URL",
+  "RUNPOD_ENDPOINT_ID",
+  "RUNPOD_API_KEY",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -52,4 +54,8 @@ export const config = {
   redis: {
     url: process.env.REDIS_URL as string,
   },
+  runpod: {
+    endpointId: process.env.RUNPOD_ENDPOINT_ID as string,
+    apiKey: process.env.RUNPOD_API_KEY as string,
+  }
 };
