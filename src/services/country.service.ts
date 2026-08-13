@@ -119,6 +119,41 @@ export const getAllCountries = async () => {
   }
 };
 
+/**
+ * Public-facing country list — active countries only.
+ *
+ * Separate from getAllCountries() rather than a flag on it: the admin list must
+ * always show inactive rows (that is how they get re-activated), and the two
+ * callers also need different field sets. Explicit select here so `isActive`
+ * itself never leaks — every row in the response is active by definition, and
+ * exposing the column invites the frontend to filter on it a second time.
+ */
+export const getActiveCountries = async () => {
+  try {
+    logger.debug("Fetching active countries from the database...");
+
+    const countries = await prisma.country.findMany({
+      where: { isActive: true },
+      orderBy: { name: "asc" },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        currencyCode: true,
+        flagUrl: true,
+      },
+    });
+
+    return countries;
+  } catch (error: any) {
+    logger.error(
+      { err: error },
+      "Failed to fetch active countries from the database"
+    );
+    throw error;
+  }
+};
+
 export const deleteCountry = async (countryId: string) => {
   const country = await prisma.country.findUnique({
     where: { id: countryId },

@@ -6,7 +6,14 @@ export function emitPageReady(
   payload: {
     pageNumber: number;
     variantIndex: number;
+    /** Print-resolution PNG. Multi-megabyte — do not render this in a browser. */
     imageUrl: string;
+    /**
+     * Web-sized WebP derivative — this is what a client should display.
+     * Null when the derivative could not be built, in which case fall back
+     * to `imageUrl`.
+     */
+    displayImageUrl: string | null;
     pageVersionId: string;
   }
 ) {

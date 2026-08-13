@@ -349,6 +349,7 @@ model PageVersion {
 
   textStampedUrl String? // Sharp output — artwork with text stamped, INPUT to ComfyUI
   comfyJobId     String? // RunPod job ID for the face-swap job
+  displayImageUrl String? // for storing the display URL that ougth to be displayed in the browser
   finalImageUrl  String? // ComfyUI output — face-swapped + text-stamped, shown to user & used in PDF
 
   isSelected   Boolean           @default(false) // chosen by user at confirm step

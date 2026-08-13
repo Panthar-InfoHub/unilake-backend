@@ -130,6 +130,7 @@ export const getOrderSessionId = async (sessionId: string) => {
       variantIndex: true,
       status: true,
       finalImageUrl: true,
+      displayImageUrl: true,
       isSelected: true,
       errorMessage: true,
     },
@@ -154,7 +155,12 @@ export const getOrderSessionId = async (sessionId: string) => {
       pageVersionId: pv.id,
       variantIndex: pv.variantIndex,
       status: pv.status,
+      // finalImageUrl is the print master (multi-MB PNG); displayImageUrl is the
+      // web derivative and is what clients should render. Null on rows generated
+      // before the derivative existed, or where building it failed — fall back
+      // to finalImageUrl in that case.
       finalImageUrl: pv.finalImageUrl,
+      displayImageUrl: pv.displayImageUrl,
       isSelected: pv.isSelected,
       errorMessage: pv.errorMessage,
     }));
@@ -211,6 +217,16 @@ const EXTENSION_TO_CONTENT_TYPE: Record<
 
 const PHOTO_UPLOAD_EXPIRY_SECONDS = 5 * 60; // 5 minutes — plenty of time for a direct browser upload
 
+// Both photo endpoints gate on this same list: CREATED is the first upload,
+// PHOTO_UPLOADED is the user swapping in a better photo before generation
+// starts. Kept as ONE constant precisely because the two halves drifted apart
+// once — confirm was widened to allow re-uploads while upload-url stayed at
+// CREATED only, which made re-upload unreachable from the frontend.
+const PHOTO_MUTABLE_STATUSES: OrderSessionStatus[] = [
+  "CREATED",
+  "PHOTO_UPLOADED",
+];
+
 export async function createPhotoUploadUrl(
   sessionId: string,
   fileExtension: "jpg" | "jpeg" | "png" | "webp"
@@ -223,9 +239,9 @@ export async function createPhotoUploadUrl(
     throw new NotFoundError("OrderSession not found");
   }
 
-  if (session.status !== "CREATED") {
+  if (!PHOTO_MUTABLE_STATUSES.includes(session.status)) {
     throw new ConflictError(
-      "Photo upload is only allowed while the session is in CREATED status"
+      `Photo upload is only allowed before generation starts. Current status: ${session.status}`
     );
   }
 
@@ -251,14 +267,7 @@ export async function confirmSessionPhoto(sessionId: string, key: string) {
     throw new NotFoundError("OrderSession not found");
   }
 
-  // Allow confirm from either CREATED (first upload) or PHOTO_UPLOADED
-  // (user re-uploaded a better photo before generation started).
-  const CONFIRMABLE_STATUSES: OrderSessionStatus[] = [
-    "CREATED",
-    "PHOTO_UPLOADED",
-  ];
-
-  if (!CONFIRMABLE_STATUSES.includes(session.status)) {
+  if (!PHOTO_MUTABLE_STATUSES.includes(session.status)) {
     throw new ConflictError(
       `Photo confirm is only allowed before generation starts. Current status: ${session.status}`,
     );
@@ -337,28 +346,88 @@ async function enqueuePreviewGenerationJobs(
     );
   }
 
-  // Step 2: Create all PageVersion rows atomically in a transaction.
-  // If any INSERT fails, none of them persist — user retries cleanly.
-  const createdRows = await prisma.$transaction(
-    previewPages.map((page) =>
-      prisma.pageVersion.create({
-        data: {
-          orderSessionId,
-          pageId: page.id,
-          variantIndex: 0,
-          status: "QUEUED",
-        },
-      })
-    )
+  // Step 2: Recover any rows left behind by a previous failed attempt.
+  //
+  // Rows are committed to Postgres BEFORE anything is written to Redis, so a
+  // Redis outage leaves QUEUED rows with no job to ever pick them up. Those
+  // rows occupy @@unique([orderSessionId, pageId, variantIndex]), so blindly
+  // creating fresh ones on retry throws P2002 and the session can never
+  // recover. Reuse what already exists; create only what is missing.
+  const existingRows = await prisma.pageVersion.findMany({
+    where: {
+      orderSessionId,
+      variantIndex: 0,
+      pageId: { in: previewPages.map((page) => page.id) },
+    },
+  });
+
+  const existingPageIds = new Set(existingRows.map((row) => row.pageId));
+  const pagesNeedingRows = previewPages.filter(
+    (page) => !existingPageIds.has(page.id)
   );
 
-  // Step 3: Enqueue BullMQ jobs — one per created row, with priority.
-  // Runs AFTER the transaction commits, so a Redis failure here can't
-  // orphan the DB rows in an inconsistent state.
+  if (existingRows.length > 0) {
+    logger.info(
+      {
+        orderSessionId,
+        reused: existingRows.length,
+        created: pagesNeedingRows.length,
+      },
+      "enqueuePreviewGenerationJobs: reusing PageVersion rows from a prior failed attempt"
+    );
+  }
 
-  const enqueuePromises = createdRows.map((row, index) => {
-    const page = previewPages[index]!;
-    const priority = computeJobPriority(sessionCreatedAt, page.pageNumber)
+  // Step 3: Create the missing rows atomically.
+  // If any INSERT fails, none of them persist — user retries cleanly.
+  const createdRows =
+    pagesNeedingRows.length > 0
+      ? await prisma.$transaction(
+          pagesNeedingRows.map((page) =>
+            prisma.pageVersion.create({
+              data: {
+                orderSessionId,
+                pageId: page.id,
+                variantIndex: 0,
+                status: "QUEUED",
+              },
+            })
+          )
+        )
+      : [];
+
+  // Step 4: Work out which rows actually need a job.
+  //
+  // A reused row that already reached SD_READY is finished — re-queueing it
+  // would only make the worker re-emit page:ready for no reason. Everything
+  // else (QUEUED orphans, FAILED rows, rows stranded mid-pipeline) gets reset
+  // to QUEUED so the DB reflects that they are waiting again.
+  const rowsToEnqueue = [...existingRows, ...createdRows].filter(
+    (row) => row.status !== "SD_READY"
+  );
+
+  const staleRowIds = existingRows
+    .filter((row) => row.status !== "SD_READY" && row.status !== "QUEUED")
+    .map((row) => row.id);
+
+  if (staleRowIds.length > 0) {
+    await prisma.pageVersion.updateMany({
+      where: { id: { in: staleRowIds } },
+      data: { status: "QUEUED", errorMessage: null },
+    });
+  }
+
+  // Step 5: Enqueue BullMQ jobs — one per row, with priority.
+  // Runs AFTER all DB writes commit, so a Redis failure here can't
+  // orphan the DB rows in an inconsistent state.
+  //
+  // Pairing is by pageId lookup rather than array index: existing and created
+  // rows come from two different queries, so positional pairing against
+  // previewPages would silently attach the wrong priority to the wrong page.
+  const pageById = new Map(previewPages.map((page) => [page.id, page]));
+
+  const enqueuePromises = rowsToEnqueue.map((row) => {
+    const page = pageById.get(row.pageId)!;
+    const priority = computeJobPriority(sessionCreatedAt, page.pageNumber);
 
     return sdGenerationQueue.add(
       "generate-page",
@@ -370,11 +439,11 @@ async function enqueuePreviewGenerationJobs(
   await Promise.all(enqueuePromises);
 
   logger.info(
-    { orderSessionId, jobCount: createdRows.length },
+    { orderSessionId, jobCount: rowsToEnqueue.length },
     "Preview generation jobs enqueued"
   );
 
-  return createdRows.length;
+  return rowsToEnqueue.length;
 }
 
 const GENERATABLE_STATUSES: OrderSessionStatus[] = [

@@ -9,6 +9,7 @@ import {
   createCountry,
   updateCountry,
   getAllCountries,
+  getActiveCountries,
   deleteCountry
 } from "../services/country.service.js";
 import {
@@ -124,6 +125,18 @@ export const getAllCountriesHandler = asyncHandler(async (req: Request, res : Re
 
     sendSuccess(res, 200, countries);
 })
+
+// Public catalogue of shipping/pricing countries. Admins use
+// getAllCountriesHandler, which also returns deactivated rows.
+export const getActiveCountriesHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    logger.debug("Incoming request to fetch active countries");
+
+    const countries = await getActiveCountries();
+
+    sendSuccess(res, 200, countries);
+  }
+);
 
 
 export const deleteCountryHandler = asyncHandler(

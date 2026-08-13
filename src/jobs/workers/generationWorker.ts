@@ -25,6 +25,7 @@ import { stampTextOnPage } from "./sd/textStamp.js";
 import { buildWorkflow } from "./sd/workflow.js";
 import { submitAndAwaitResult } from "./sd/runpodClient.js";
 import { acquirePhoto, releasePhoto } from "./sd/photoCache.js";
+import { buildDisplayImage } from "../../lib/image.js";
 import sharp from "sharp";
 
 type GeneratePageJobData = {
@@ -65,6 +66,52 @@ async function markPageVersionFailed(
 }
 
 /**
+ * Builds the browser-facing derivative of a finished page and uploads it beside
+ * the print master, returning its public URL.
+ *
+ * 🔴 Best-effort on purpose — never throws.
+ *
+ * By the time this runs, the print PNG is already uploaded and the expensive
+ * work (a GPU round trip that can take minutes) is done. Failing the whole job
+ * because a resize failed would throw all of that away and hand the user a
+ * FAILED page for a purely cosmetic problem.
+ *
+ * So on failure we log and return null. The API then returns
+ * `displayImageUrl: null`, the frontend falls back to `finalImageUrl`, and the
+ * user sees their page — just the heavier version. Degraded, not broken.
+ */
+async function buildAndUploadDisplayImage(
+  sessionId: string,
+  pageVersionId: string,
+  sourceBuffer: Buffer
+): Promise<string | null> {
+  try {
+    const displayBuffer = await buildDisplayImage(sourceBuffer);
+    const displayKey = `sessions/${sessionId}/final/${pageVersionId}.webp`;
+
+    await uploadFile("public", displayKey, displayBuffer, "image/webp");
+
+    logger.info(
+      {
+        pageVersionId,
+        printBytes: sourceBuffer.length,
+        displayBytes: displayBuffer.length,
+        reduction: `${(sourceBuffer.length / displayBuffer.length).toFixed(1)}x`,
+      },
+      "[SD Worker] Display image uploaded"
+    );
+
+    return getPublicUrl(displayKey);
+  } catch (err) {
+    logger.warn(
+      { err, pageVersionId },
+      "[SD Worker] Display image build failed — falling back to the print master"
+    );
+    return null;
+  }
+}
+
+/**
  * Check whether this was the final preview page for the session. If so,
  * atomically flip the session status to PREVIEW_READY and emit the
  * WebSocket event. Uses a transaction with row-level locking to prevent
@@ -75,7 +122,7 @@ async function markPageVersionFailed(
  */
 async function maybeMarkPreviewReady(
   orderSessionId: string,
-  freePreviewPages: number
+  comicId: string
 ): Promise<boolean> {
   return await prisma.$transaction(async (tx) => {
     // Lock the row so concurrent workers block here until we commit.
@@ -94,18 +141,34 @@ async function maybeMarkPreviewReady(
       return false;
     }
 
+    // `Page.isPreviewPage` is the only source of truth for which pages are
+    // free — the same filter enqueuePreviewGenerationJobs uses to decide what
+    // to generate. Counting against Comic.freePreviewPages instead desyncs the
+    // moment that counter drifts from the flags: too high and the session
+    // never leaves GENERATING_PREVIEW, too low and it flips early.
+    const totalPreviewPages = await tx.page.count({
+      where: { comicId, isPreviewPage: true },
+    });
+
+    // No preview pages flagged means nothing was ever enqueued — never flip.
+    // Without this guard the comparison below is 0 >= 0 and fires instantly.
+    if (totalPreviewPages === 0) return false;
+
     // Count distinct pages that have at least one SD_READY variant.
     // We count on `pageId` so pages with multiple variants only count once.
-    const readyPages = await tx.pageVersion.findMany({
+    // Scoped to preview pages so paid-page generations can never satisfy the
+    // preview transition.
+    const readyPreviewPages = await tx.pageVersion.findMany({
       where: {
         orderSessionId,
         status: "SD_READY",
+        page: { isPreviewPage: true },
       },
       select: { pageId: true },
       distinct: ["pageId"],
     });
 
-    if (readyPages.length < freePreviewPages) {
+    if (readyPreviewPages.length < totalPreviewPages) {
       return false; // Not the last one yet.
     }
 
@@ -139,9 +202,7 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
           },
         },
       },
-      orderSession: {
-        include: { comic: { select: { freePreviewPages: true } } },
-      },
+      orderSession: true,
     },
   });
 
@@ -172,6 +233,9 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
       pageNumber: page.pageNumber,
       variantIndex: pageVersion.variantIndex,
       imageUrl: pageVersion.finalImageUrl,
+      // May be null on rows written before this field existed, or where the
+      // derivative failed. The client falls back to imageUrl.
+      displayImageUrl: pageVersion.displayImageUrl,
       pageVersionId: pageVersion.id,
     });
     return;
@@ -264,6 +328,8 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
     // gets deleted.
 
     let finalImageUrl: string;
+    // Null when the derivative could not be built — see buildAndUploadDisplayImage.
+    let displayImageUrl: string | null = null;
     let comfyJobId: string | null = null;
 
     if (!page.hasFace) {
@@ -285,6 +351,12 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
       const finalKey = `sessions/${sessionId}/final/${pageVersionId}.png`;
       await uploadFile("public", finalKey, stampedBuffer, "image/png");
       finalImageUrl = getPublicUrl(finalKey);
+
+      displayImageUrl = await buildAndUploadDisplayImage(
+        sessionId,
+        pageVersionId,
+        stampedBuffer
+      );
     } else {
       // === 5a. GATHER INPUTS FOR COMFYUI ===
       const stampedBufferForComfy = await downloadFileToBuffer(
@@ -396,6 +468,12 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
       await uploadFile("public", finalKey, result.imageBuffer, "image/png");
       finalImageUrl = getPublicUrl(finalKey);
       comfyJobId = result.jobId;
+
+      displayImageUrl = await buildAndUploadDisplayImage(
+        sessionId,
+        pageVersionId,
+        result.imageBuffer
+      );
     }
 
     /// === 6. MARK SD_READY ===
@@ -412,16 +490,22 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
       data: {
         status: "SD_READY",
         finalImageUrl,
+        displayImageUrl,
         comfyJobId,
         errorMessage: null,
       },
     });
 
     // === 7. NOTIFY BROWSER ===
+    //
+    // Both URLs go out. `imageUrl` stays the print master so the event shape
+    // remains backward compatible; `displayImageUrl` is what a browser should
+    // actually render, and is null when the derivative could not be built.
     emitPageReady(sessionId, {
       pageNumber: page.pageNumber,
       variantIndex: pageVersion.variantIndex,
       imageUrl: finalImageUrl,
+      displayImageUrl,
       pageVersionId: pageVersion.id,
     });
 
@@ -433,7 +517,7 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
     // a page as far as PREVIEW_READY counting is concerned.
     const flipped = await maybeMarkPreviewReady(
       sessionId,
-      orderSession.comic.freePreviewPages
+      orderSession.comicId
     );
 
     if (flipped) {

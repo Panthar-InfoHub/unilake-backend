@@ -14,6 +14,7 @@ import { getActiveAnnouncementsHandler } from "../controllers/announcement.contr
 import { createFeedbackHandler } from "../controllers/feedback.controller.js";
 import { createFeedbackSchema } from "../validators/feedback.schema.js";
 import { getActiveTeamMembersHandler } from "../controllers/teamMember.controller.js";
+import { getActiveCountriesHandler } from "../controllers/country.controller.js";
 const router = Router();
 
 // This will give the public comic
@@ -47,8 +48,12 @@ router.get("/hero-images", getActiveHeroImagesHandler);
 router.get("/customer-reviews", getActiveCustomerReviewsHandler);
 
 
-// team meber 
+// team meber
 router.get("/team-members", getActiveTeamMembersHandler);
+
+
+// countries — active only, for the shipping/pricing country picker
+router.get("/countries", getActiveCountriesHandler);
 
 
 
