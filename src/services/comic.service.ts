@@ -216,38 +216,54 @@ export async function deleteComic(comicId: string) {
     );
   }
 
+  // Collect ALL R2 keys we'll clean up BEFORE the DB delete — thumbnails plus
+  // every page's artwork and mask. Nothing hits R2 yet; this is just planning.
   const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
+  const thumbnailKeys = comic.coverThumbnailUrls.map((url) =>
+    url.replace(`${publicBase}/`, "")
+  );
+  const pageAssetKeys = comic.pages.flatMap((p) =>
+    [p.artworkUrl, p.maskUrl]
+      .filter((url): url is string => Boolean(url))
+      .map((url) => url.replace(`${publicBase}/`, ""))
+  );
 
-  // Best-effort R2 cleanup for all thumbnails before DB delete
-  if (comic.coverThumbnailUrls.length > 0) {
-    for (const url of comic.coverThumbnailUrls) {
-      const key = url.replace(`${publicBase}/`, "");
-      try {
-        await deleteFile("public", key);
-        logger.info({ comicId, key }, "Deleted comic thumbnail from R2");
-      } catch (error) {
-        logger.warn({ error, comicId, key }, "Failed to delete comic thumbnail from R2");
-      }
+  // DB delete is the moment of truth. If it throws, we haven't touched R2 —
+  // caller sees an error and the comic + all its assets stay intact, exactly
+  // recoverable by retrying the delete. Pages cascade-delete in the DB via
+  // the schema's onDelete: Cascade. (Audit 8.15 — DB first, R2 second.)
+  await prisma.comic.delete({ where: { id: comicId } });
+
+  // Best-effort R2 cleanup AFTER the DB delete succeeded. Failures here mean
+  // orphaned files (wasted storage) but never rows pointing at 404s.
+  for (const key of thumbnailKeys) {
+    try {
+      await deleteFile("public", key);
+      logger.info({ comicId, key }, "Deleted comic thumbnail from R2");
+    } catch (error) {
+      logger.warn(
+        { error, comicId, key },
+        "Failed to delete comic thumbnail from R2 after DB delete — orphaned file"
+      );
     }
   }
 
-  // Pages cascade-delete in the DB, but their R2 assets do not — clean them up
-  // here or every deleted comic leaves orphaned, permanently public artwork.
-  const pageAssetUrls = comic.pages.flatMap((p) =>
-    [p.artworkUrl, p.maskUrl].filter((url): url is string => Boolean(url))
-  );
-
-  for (const url of pageAssetUrls) {
-    const key = url.replace(`${publicBase}/`, "");
+  for (const key of pageAssetKeys) {
     try {
       await deleteFile("public", key);
       logger.info({ comicId, key }, "Deleted page asset from R2");
     } catch (error) {
-      logger.warn({ error, comicId, key }, "Failed to delete page asset from R2");
+      logger.warn(
+        { error, comicId, key },
+        "Failed to delete page asset from R2 after DB delete — orphaned file"
+      );
     }
   }
 
-  await prisma.comic.delete({ where: { id: comicId } });
+  logger.info(
+    { comicId, thumbnailCount: thumbnailKeys.length, pageAssetCount: pageAssetKeys.length },
+    "Comic deleted (pages + bubbles cascade-deleted, R2 assets swept)"
+  );
 }
 
 export const updateComicPricing = async (

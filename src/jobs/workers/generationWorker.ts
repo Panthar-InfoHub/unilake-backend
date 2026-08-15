@@ -112,74 +112,94 @@ async function buildAndUploadDisplayImage(
 }
 
 /**
- * Check whether this was the final preview page for the session. If so,
- * atomically flip the session status to PREVIEW_READY and emit the
- * WebSocket event. Uses a transaction with row-level locking to prevent
- * duplicate transitions when multiple pages finish concurrently.
+ * Called after every terminal PageVersion transition (SD_READY or FAILED).
+ * Decides whether the session as a whole is now complete, and if so, flips
+ * its status atomically to either PREVIEW_READY (any successes) or FAILED
+ * (zero successes — every preview page final-failed).
  *
- * Safe to call after every SD_READY. Returns whether the transition fired,
- * mainly for logging.
+ * Concurrency (audit 9.2): the flip uses `updateMany` with the current status
+ * as part of the WHERE clause. Postgres guarantees only one such update can
+ * match — a second worker's updateMany will report count=0 and become a no-op.
+ * No transactions, no fake row-locks, no duplicate events.
+ *
+ * Success-wins semantics: if even one preview page reached SD_READY, the
+ * session is PREVIEW_READY. FAILED is only written when every preview page
+ * has final-failed with zero successes.
+ *
+ * Returns which branch fired so the caller can emit the right event.
  */
-async function maybeMarkPreviewReady(
+type PreviewCompleteResult = "not-done" | "ready" | "failed";
+
+async function maybeMarkPreviewComplete(
   orderSessionId: string,
   comicId: string
-): Promise<boolean> {
-  return await prisma.$transaction(async (tx) => {
-    // Lock the row so concurrent workers block here until we commit.
-    // Prisma doesn't have a first-class SELECT FOR UPDATE, but calling
-    // findUnique inside a transaction serializes access via Postgres'
-    // MVCC — combined with the status check below, no duplicate flips.
-    const session = await tx.orderSession.findUnique({
-      where: { id: orderSessionId },
-      select: { status: true },
-    });
-
-    if (!session) return false;
-
-    // Someone else already flipped it. Nothing to do.
-    if (session.status !== "GENERATING_PREVIEW") {
-      return false;
-    }
-
-    // `Page.isPreviewPage` is the only source of truth for which pages are
-    // free — the same filter enqueuePreviewGenerationJobs uses to decide what
-    // to generate. Counting against Comic.freePreviewPages instead desyncs the
-    // moment that counter drifts from the flags: too high and the session
-    // never leaves GENERATING_PREVIEW, too low and it flips early.
-    const totalPreviewPages = await tx.page.count({
-      where: { comicId, isPreviewPage: true },
-    });
-
-    // No preview pages flagged means nothing was ever enqueued — never flip.
-    // Without this guard the comparison below is 0 >= 0 and fires instantly.
-    if (totalPreviewPages === 0) return false;
-
-    // Count distinct pages that have at least one SD_READY variant.
-    // We count on `pageId` so pages with multiple variants only count once.
-    // Scoped to preview pages so paid-page generations can never satisfy the
-    // preview transition.
-    const readyPreviewPages = await tx.pageVersion.findMany({
-      where: {
-        orderSessionId,
-        status: "SD_READY",
-        page: { isPreviewPage: true },
-      },
-      select: { pageId: true },
-      distinct: ["pageId"],
-    });
-
-    if (readyPreviewPages.length < totalPreviewPages) {
-      return false; // Not the last one yet.
-    }
-
-    // We're the last. Flip the status.
-    await tx.orderSession.update({
-      where: { id: orderSessionId },
-      data: { status: "PREVIEW_READY" },
-    });
-
-    return true;
+): Promise<PreviewCompleteResult> {
+  // `Page.isPreviewPage` is the only source of truth for which pages are
+  // free — same filter enqueuePreviewGenerationJobs uses. Counting against
+  // Comic.freePreviewPages instead would desync the moment that counter drifts.
+  const totalPreviewPages = await prisma.page.count({
+    where: { comicId, isPreviewPage: true },
   });
+
+  // No preview pages flagged means nothing was ever enqueued. Never flip.
+  if (totalPreviewPages === 0) return "not-done";
+
+  // Every terminal PageVersion row for this session's preview pages —
+  // SD_READY (won) or FAILED (final-failed after all BullMQ attempts).
+  //
+  // Deliberately NOT `distinct: ["pageId"]`: a page can hold several variants
+  // (a failed attempt plus a successful regeneration), and collapsing to one
+  // row per page before we inspect them would pick an arbitrary variant —
+  // there is no ordering that makes that choice meaningful for both of the
+  // questions below. Bounded by preview pages × the variant cap, so this is a
+  // handful of rows.
+  const terminalRows = await prisma.pageVersion.findMany({
+    where: {
+      orderSessionId,
+      status: { in: ["SD_READY", "FAILED"] },
+      page: { isPreviewPage: true },
+    },
+    select: { pageId: true, status: true },
+  });
+
+  // Two separate questions, so two sets:
+  //   terminalPageIds  — has this page settled at all?
+  //   succeededPageIds — did ANY variant of it succeed?
+  // A page with variant 0 FAILED and variant 1 SD_READY belongs in both, which
+  // is the point: success-wins is evaluated per page, across its variants.
+  const terminalPageIds = new Set<string>();
+  const succeededPageIds = new Set<string>();
+
+  for (const row of terminalRows) {
+    terminalPageIds.add(row.pageId);
+    if (row.status === "SD_READY") succeededPageIds.add(row.pageId);
+  }
+
+  // Not every preview page has reached a terminal state yet — nothing to do.
+  if (terminalPageIds.size < totalPreviewPages) return "not-done";
+
+  // Success-wins: any single SD_READY page keeps the session recoverable.
+  const anySuccess = succeededPageIds.size > 0;
+  const targetStatus = anySuccess ? "PREVIEW_READY" : "FAILED";
+
+  // Atomic flip. `updateMany` with status in the where clause is Postgres-
+  // native single-statement atomicity — a concurrent worker that arrives one
+  // microsecond later will match zero rows and its own updateMany will no-op.
+  // This is the real fix for audit 9.2 (the previous $transaction claim was
+  // relying on a lock that findUnique does not actually take).
+  const { count } = await prisma.orderSession.updateMany({
+    where: {
+      id: orderSessionId,
+      status: "GENERATING_PREVIEW", // guard is IN the query, not a JS check
+    },
+    data: { status: targetStatus },
+  });
+
+  // count=0 means someone else already flipped it. Return "not-done" so the
+  // caller does not emit a duplicate event.
+  if (count === 0) return "not-done";
+
+  return anySuccess ? "ready" : "failed";
 }
 
 async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
@@ -511,16 +531,19 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
 
     // === 8. CHECK IF THIS WAS THE LAST PREVIEW PAGE ===
     //
-    // Race-safe: transaction with a status guard ensures only one worker
-    // triggers the transition when the last few pages complete at nearly
-    // the same time. Fires for face and non-face pages alike — a page is
-    // a page as far as PREVIEW_READY counting is concerned.
-    const flipped = await maybeMarkPreviewReady(
+    // Race-safe via updateMany with status in the WHERE clause (see the
+    // function's comment). Fires for face and non-face pages alike — a page
+    // is a page as far as preview completion is concerned.
+    //
+    // Success path can only ever produce "ready" or "not-done" — reaching
+    // this line means at least one page (this one) just went SD_READY, so
+    // the anySuccess branch will win if all other pages are terminal too.
+    const result = await maybeMarkPreviewComplete(
       sessionId,
       orderSession.comicId
     );
 
-    if (flipped) {
+    if (result === "ready") {
       logger.info(
         { sessionId },
         "[SD Worker] All preview pages done — session marked PREVIEW_READY"
@@ -581,9 +604,74 @@ export const generationWorker = new Worker<GeneratePageJobData>(
   { connection: redisClient, concurrency: 5 }
 );
 
-generationWorker.on("failed", (job, err) => {
+generationWorker.on("failed", async (job, err) => {
   logger.error(
     { jobId: job?.id, pageVersionId: job?.data?.pageVersionId, err },
-    "[SD Worker] Job failed (final)"
+    "[SD Worker] Job failed"
   );
+
+  if (!job) return;
+
+  // BullMQ's `failed` event fires on EVERY failed attempt, not just the last.
+  // Only run the completion check on the final attempt — retries in progress
+  // must not be treated as terminal failures.
+  const maxAttempts = job.opts.attempts ?? 1;
+  const isFinalAttempt = job.attemptsMade >= maxAttempts;
+
+  if (!isFinalAttempt) return;
+
+  // The job data only carries pageVersionId. Look up the session + comic so
+  // we can pass them to the completion check. This runs OUTSIDE the worker's
+  // processJob transaction, so a Prisma call here is safe.
+  const { pageVersionId } = job.data;
+
+  try {
+    const pageVersion = await prisma.pageVersion.findUnique({
+      where: { id: pageVersionId },
+      select: {
+        orderSessionId: true,
+        orderSession: { select: { comicId: true } },
+      },
+    });
+
+    if (!pageVersion) {
+      logger.warn(
+        { pageVersionId },
+        "[SD Worker] Terminal-failure handler: PageVersion not found, skipping"
+      );
+      return;
+    }
+
+    const result = await maybeMarkPreviewComplete(
+      pageVersion.orderSessionId,
+      pageVersion.orderSession.comicId
+    );
+
+    if (result === "failed") {
+      logger.error(
+        { sessionId: pageVersion.orderSessionId },
+        "[SD Worker] All preview pages final-failed — session marked FAILED"
+      );
+      // Intentionally no WebSocket emit here (Decision 4 skipped).
+      // Frontend learns via per-page `page:error` events + GET /sessions/:id.
+    } else if (result === "ready") {
+      // Edge case: this page failed, but earlier successes already covered
+      // the total. Rare — would only happen if failure and last success
+      // finish in an unusual order. Emit the ready event so a connected
+      // client doesn't miss the transition.
+      logger.info(
+        { sessionId: pageVersion.orderSessionId },
+        "[SD Worker] Session marked PREVIEW_READY from failure handler (last page failed but earlier pages covered the total)"
+      );
+      emitSessionPreviewReady(pageVersion.orderSessionId);
+    }
+  } catch (handlerErr) {
+    // A crash inside the terminal-failure handler must not itself crash the
+    // worker. Log it and move on — the session will stay in
+    // GENERATING_PREVIEW, which is exactly the pre-fix behaviour, not worse.
+    logger.error(
+      { pageVersionId, handlerErr },
+      "[SD Worker] Terminal-failure handler crashed"
+    );
+  }
 });

@@ -335,26 +335,33 @@ export async function deletePage(pageId: string) {
     throw new NotFoundError("Page not found");
   }
 
-  // Best-effort R2 cleanup of the page's public assets before the DB delete.
-  // Skipped silently for pages that never had artwork/mask attached.
+  // Collect the R2 keys we'll clean up BEFORE the DB delete, so we still
+  // have access to page.artworkUrl and page.maskUrl. Nothing hits R2 yet.
   const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
-  const assetUrls = [page.artworkUrl, page.maskUrl].filter(
-    (url): url is string => Boolean(url)
-  );
+  const r2KeysToDelete = [page.artworkUrl, page.maskUrl]
+    .filter((url): url is string => Boolean(url))
+    .map((url) => url.replace(`${publicBase}/`, ""));
 
-  for (const url of assetUrls) {
-    const key = url.replace(`${publicBase}/`, "");
+  // DB delete is the moment of truth. If it throws, we haven't touched R2 —
+  // caller sees an error and the page + its assets stay intact, exactly
+  // recoverable by retrying the delete. (Audit 8.9 — DB first, R2 second.)
+  await prisma.page.delete({
+    where: { id: pageId },
+  });
+
+  // Best-effort R2 cleanup AFTER the DB delete succeeded. Failures here mean
+  // orphaned files (wasted storage) but never a page row pointing at 404s.
+  for (const key of r2KeysToDelete) {
     try {
       await deleteFile("public", key);
       logger.info({ pageId, key }, "Deleted page asset from R2");
     } catch (error) {
-      logger.warn({ error, pageId, key }, "Failed to delete page asset from R2");
+      logger.warn(
+        { error, pageId, key },
+        "Failed to delete page asset from R2 after DB delete — orphaned file"
+      );
     }
   }
-
-  await prisma.page.delete({
-    where: { id: pageId },
-  });
 
   logger.info(
     { pageId, comicId: page.comicId, pageNumber: page.pageNumber },

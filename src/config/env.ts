@@ -1,5 +1,4 @@
 import dotenv from "dotenv";
-import { string } from "zod";
 
 dotenv.config();
 
@@ -13,12 +12,14 @@ const requriedVariables = [
   "R2_PRIVATE_BUCKET_NAME",
   "R2_PUBLIC_BUCKET_NAME",
   "R2_ENDPOINT",
+  "R2_PUBLIC_URL_BASE",
   "REDIS_URL",
   "FACEBOOK_CLIENT_ID",
   "FACEBOOK_CLIENT_SECRET",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
   "BETTER_AUTH_URL",
+  "BETTER_AUTH_SECRET",
   "RUNPOD_ENDPOINT_ID",
   "RUNPOD_API_KEY",
 ] as const;

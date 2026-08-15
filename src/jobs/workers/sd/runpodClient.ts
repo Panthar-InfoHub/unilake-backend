@@ -59,6 +59,40 @@ export type JobResult = {
   executionTimeMs: number;
 };
 
+
+// Retry settings for transient failures during status polling.
+// 3 attempts total (1 real try + 2 retries) with short backoff — 500ms, 1000ms.
+// The total worst-case extra delay per poll is 1.5s, well under the 5s poll
+// interval, so retries never cascade into slower polling.
+const FETCH_STATUS_MAX_ATTEMPTS = 3;
+const FETCH_STATUS_RETRY_DELAYS_MS = [500, 1000];
+
+/**
+ * Decides whether an error is worth retrying.
+ *
+ * Retry:  network failures (fetch threw), HTTP 5xx, HTTP 429 (rate limit).
+ * Skip:   HTTP 4xx (auth wrong, job not found, malformed request) — these
+ *         will never succeed on retry, so retrying just wastes time.
+ *
+ * A network failure is a `TypeError` thrown by fetch itself. An HTTP failure
+ * is an `AppError` we threw with the status embedded in the message. We look
+ * at both.
+ */
+function isRetryableError(err: unknown): boolean {
+  // Network-layer failure — fetch itself threw before we got any response.
+  // TypeError is what native fetch throws on DNS/TCP/connection issues.
+  if (err instanceof TypeError) return true;
+
+  // HTTP-layer failure — we threw an AppError with the status in the message.
+  if (err instanceof AppError) {
+    // Match "HTTP 5xx" or "HTTP 429" in the error message.
+    // Any other 4xx is a permanent error — don't retry.
+    return /HTTP (5\d{2}|429)/.test(err.message);
+  }
+
+  // Unknown error shape — safer not to retry.
+  return false;
+}
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -115,10 +149,11 @@ async function submit(params: SubmitParams): Promise<string> {
 }
 
 /**
- * One-shot status check for a submitted job.
+ * One raw HTTP call to RunPod's /status endpoint. No retry logic — that's
+ * layered on top in fetchStatus below. Kept separate so the retry wrapper
+ * stays readable and this function is easy to reason about on its own.
  */
-
-async function fetchStatus(jobId: string): Promise<RunPodStatusResponse> {
+async function fetchStatusOnce(jobId: string): Promise<RunPodStatusResponse> {
   const url = `${RUNPOD_BASE_URL}/${config.runpod.endpointId}/status/${jobId}`;
 
   const res = await fetch(url, {
@@ -141,6 +176,59 @@ async function fetchStatus(jobId: string): Promise<RunPodStatusResponse> {
     );
   }
   return (await res.json()) as RunPodStatusResponse;
+}
+
+/**
+ * Status check for a submitted job, with retries for transient failures.
+ *
+ * Fixes audit 9.8: a single network blip on ANY of the ~200 status polls
+ * per job used to throw immediately, which bubbled to BullMQ and triggered
+ * a full-job retry — submitting a brand-new RunPod job while the original
+ * kept running and burning GPU. You paid for both.
+ *
+ * Now: transient failures retry up to 2 extra times with 500ms/1000ms
+ * backoff before giving up. Permanent failures (4xx other than 429) fail
+ * immediately as before — retrying a bad auth key or a missing job would
+ * just waste time.
+ */
+async function fetchStatus(jobId: string): Promise<RunPodStatusResponse> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= FETCH_STATUS_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fetchStatusOnce(jobId);
+    } catch (err) {
+      lastError = err;
+
+      // Permanent error — no point retrying. Re-throw exactly as thrown.
+      if (!isRetryableError(err)) {
+        throw err;
+      }
+
+      // Out of attempts — surface the last error to the caller. BullMQ will
+      // then retry the whole job, but this only happens after 3 consecutive
+      // real failures, which is a genuine RunPod outage, not a blip.
+      if (attempt === FETCH_STATUS_MAX_ATTEMPTS) {
+        logger.error(
+          { jobId, attempt, err },
+          "[RunPod] fetchStatus exhausted retries — surfacing to worker"
+        );
+        throw err;
+      }
+
+      // Retryable, and we have attempts left — log and wait.
+      const delayMs = FETCH_STATUS_RETRY_DELAYS_MS[attempt - 1]!;
+      logger.warn(
+        { jobId, attempt, delayMs, err },
+        "[RunPod] Transient failure on status poll — retrying"
+      );
+      await sleep(delayMs);
+    }
+  }
+
+  // Unreachable — the loop either returns, throws, or hits its final-attempt
+  // throw above. This is here to keep TypeScript happy about the return type.
+  throw lastError;
 }
 
 /**

@@ -21,10 +21,60 @@ import {
   MAX_VARIANTS_AFTER_PAYMENT,
 } from "../config/generation.js";
 
-
-function computeJobPriority(sessionCreatedAt: Date, pageNumber: number): number {
-  const sessionSecondsInDay = Math.floor(sessionCreatedAt.getTime() / 1000) % 86_400;
+function computeJobPriority(
+  sessionCreatedAt: Date,
+  pageNumber: number
+): number {
+  const sessionSecondsInDay =
+    Math.floor(sessionCreatedAt.getTime() / 1000) % 86_400;
   return sessionSecondsInDay + pageNumber * 80_000;
+}
+/** Throws if the session is past expiresAt; also flips it to FAILED so future reads are clean. Audit 11.1. */
+async function assertNotExpired(session: {
+  id: string;
+  expiresAt: Date;
+  status: OrderSessionStatus;
+}): Promise<void> {
+  if (session.expiresAt >= new Date()) return;
+
+  // Already terminal — don't rewrite the row, just refuse the mutation.
+  const TERMINAL_STATUSES: OrderSessionStatus[] = ["FAILED", "COMPLETED"];
+  if (TERMINAL_STATUSES.includes(session.status)) {
+    throw new ConflictError("This session has expired.");
+  }
+
+ // Atomic flip via updateMany + status guard — safe against concurrent callers.
+  await prisma.orderSession.updateMany({
+    where: {
+      id: session.id,
+      status: { notIn: TERMINAL_STATUSES },
+    },
+    data: { status: "FAILED" },
+  });
+
+  logger.warn(
+    { sessionId: session.id, expiredAt: session.expiresAt },
+    "Session expired on mutation attempt — flipped to FAILED"
+  );
+
+  throw new ConflictError("This session has expired.");
+}
+
+/** Hourly sweeper — flips every non-terminal expired session to FAILED. R2 cleanup is not done here (out of scope). */
+export async function sweepExpiredSessions(): Promise<number> {
+  const { count } = await prisma.orderSession.updateMany({
+    where: {
+      expiresAt: { lt: new Date() },
+      status: { notIn: ["FAILED", "COMPLETED"] },
+    },
+    data: { status: "FAILED" },
+  });
+
+  if (count > 0) {
+    logger.info({ expiredCount: count }, "[Expiry Sweeper] Flipped expired sessions to FAILED");
+  }
+
+  return count;
 }
 export async function createOrderSession(
   input: CreateSessionInput,
@@ -58,6 +108,8 @@ export async function updateOrderSession(
   if (!session) {
     throw new NotFoundError("OrderSession not found");
   }
+
+  await assertNotExpired(session);
 
   const data: Prisma.OrderSessionUpdateInput = {};
   if (input.childName !== undefined) data.childName = input.childName;
@@ -239,6 +291,8 @@ export async function createPhotoUploadUrl(
     throw new NotFoundError("OrderSession not found");
   }
 
+  await assertNotExpired(session);
+
   if (!PHOTO_MUTABLE_STATUSES.includes(session.status)) {
     throw new ConflictError(
       `Photo upload is only allowed before generation starts. Current status: ${session.status}`
@@ -267,9 +321,23 @@ export async function confirmSessionPhoto(sessionId: string, key: string) {
     throw new NotFoundError("OrderSession not found");
   }
 
+  await assertNotExpired(session);
+
   if (!PHOTO_MUTABLE_STATUSES.includes(session.status)) {
     throw new ConflictError(
-      `Photo confirm is only allowed before generation starts. Current status: ${session.status}`,
+      `Photo confirm is only allowed before generation starts. Current status: ${session.status}`
+    );
+  }
+  // Audit 8.2 — key ownership check. Rejects keys from other sessions'
+  // folders (or malformed paths) before writing to the DB.
+  const expectedPrefix = `sessions/${sessionId}/`;
+  if (!key.startsWith(expectedPrefix)) {
+    logger.warn(
+      { sessionId, key },
+      "confirmSessionPhoto: rejected key from outside this session's folder"
+    );
+    throw new ValidationError(
+      "The provided key does not belong to this session."
     );
   }
 
@@ -312,7 +380,7 @@ async function enqueuePreviewGenerationJobs(
   freePreviewPages: number,
   sessionCreatedAt: Date
 ): Promise<number> {
- // STEP 1: Find the pages that are explicitly marked as preview pages.
+  // STEP 1: Find the pages that are explicitly marked as preview pages.
   //
   // `isPreviewPage` is the source of truth — the admin picks WHICH pages
   // are free (could be any subset, not necessarily the first N). The
@@ -461,6 +529,8 @@ export async function triggerGeneration(sessionId: string) {
     throw new NotFoundError("OrderSession not found");
   }
 
+  await assertNotExpired(session)
+
   if (!GENERATABLE_STATUSES.includes(session.status)) {
     throw new ConflictError(
       `Cannot trigger generation — session status is already '${session.status}'`
@@ -495,6 +565,7 @@ const REGENERATABLE_STATUSES: OrderSessionStatus[] = [
   "PREVIEW_READY",
   "GENERATING_PAID",
   "PAID_PAGES_READY",
+  "FAILED",
 ];
 const POST_PAYMENT_STATUSES: OrderSessionStatus[] = [
   "PAID",
@@ -511,6 +582,8 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
   if (!session) {
     throw new NotFoundError("OrderSession not found");
   }
+
+  await assertNotExpired(session);
 
   const page = await prisma.page.findUnique({
     where: { comicId_pageNumber: { comicId: session.comicId, pageNumber } },
@@ -555,7 +628,35 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
     });
   });
 
-  const priority = computeJobPriority(session.createdAt, page.pageNumber)
+  // A FAILED session is regeneratable, but maybeMarkPreviewComplete only flips
+  // sessions that are currently GENERATING_PREVIEW. Without moving the session
+  // back first, a successful regeneration would write SD_READY on the page and
+  // leave the session stuck at FAILED forever.
+  //
+  // This runs BEFORE the enqueue on purpose: the worker has concurrency 5 and
+  // picks jobs up immediately, so flipping afterwards would race a fast page
+  // finishing, no-opping the guard, and stranding the session the other way.
+  //
+  // updateMany + status guard makes concurrent regenerations safe — the second
+  // one matches zero rows and no-ops. No rollback if the enqueue below throws:
+  // GENERATING_PREVIEW is itself regeneratable, so the user retrying re-enters
+  // the normal path, and a rollback would race a sibling regeneration that did
+  // enqueue successfully.
+  if (session.status === "FAILED") {
+    const { count } = await prisma.orderSession.updateMany({
+      where: { id: sessionId, status: "FAILED" },
+      data: { status: "GENERATING_PREVIEW" },
+    });
+
+    if (count > 0) {
+      logger.info(
+        { sessionId, pageNumber },
+        "Session moved FAILED → GENERATING_PREVIEW to accept a regeneration"
+      );
+    }
+  }
+
+  const priority = computeJobPriority(session.createdAt, page.pageNumber);
 
   await sdGenerationQueue.add(
     "generate-page",
@@ -584,6 +685,8 @@ export async function attachUserToSession(sessionId: string, userId: string) {
   if (!session) {
     throw new NotFoundError("OrderSession not found");
   }
+
+  await assertNotExpired(session)
 
   if (session.userId === userId) {
     return session;

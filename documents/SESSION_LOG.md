@@ -4,6 +4,94 @@
 
 ---
 
+## Session — August 15, 2026 — P1 fix verification, two defects found in the fixes themselves, doc sync
+
+**Triggered by:** Guts had worked through the P1 list from `CODE_VS_DOCS_AUDIT.md` and brought a written summary of ten fixes to be checked. The ask was verification, not implementation — read the code and say whether each claim actually holds. It turned into two code fixes and a full doc pass.
+
+**What was verified:** every claimed fix read against the actual source — `env.ts`, `session.service.ts`, `generationWorker.ts`, `runpodClient.ts`, `workers/index.ts`, the delete paths in `page.service.ts` and `comic.service.ts`, plus the four core docs and `queues.ts` for the BullMQ attempts config.
+
+**Eight fixes confirmed correct as described:** 2.9/2.10/2.11 (env vars), 9.8 (RunPod retry — the `/HTTP (5\d{2}|429)/` match genuinely lines up with what `fetchStatusOnce` throws, and `TypeError` is the right discriminator for native fetch), 8.9/8.15 (delete ordering, exactly the five-step shape claimed), 8.2 (key ownership, correctly placed after the status checks and before any DB write), 9.2 (`updateMany` + status guard is real atomicity, and the fake-lock comment is gone), 11.1 layer 1 (`assertNotExpired` present at all six call sites, and the terminal-status early return means the flip writes once rather than on every retry), 13.1 (genuinely already done). Also confirmed correct: `job.attemptsMade >= job.opts.attempts` is right for BullMQ v5, where `attemptsMade` is incremented before the `failed` event fires.
+
+**Two defects found — both introduced by the P1 fixes, both fixed this session:**
+- **`FAILED` sessions could never recover.** Adding `FAILED` to `REGENERATABLE_STATUSES` let a user enqueue a regeneration, but `regeneratePage` never reset the session status and `maybeMarkPreviewComplete` only flips sessions already at `GENERATING_PREVIEW`. A *successful* regeneration therefore wrote `SD_READY` on the page while the session stayed pinned at `FAILED` forever. The advertised self-recovery path enqueued work with no route back out.
+- **`distinct: ["pageId"]` was nondeterministic.** The terminal-state query collapsed each page to one row with no `orderBy`. For a page holding variant 0 `FAILED` plus variant 1 `SD_READY` — exactly what a regeneration produces — it could read the `FAILED` row and flip the whole session to `FAILED` despite the retry having worked. The code comment claimed "latest variant," which described an ordering the query never had.
+
+**These two compounded, which is the part worth remembering.** Fixing the recovery path alone would have produced a recovery that nondeterministically undid itself, because a recovered session is precisely the mixed-variant shape the `distinct` bug mishandles. Neither is visible in isolation; both surface only on the `FAILED → regenerate → PREVIEW_READY` round-trip. That round-trip is now the single highest-value manual test in `CURRENT_STATE.md`.
+
+**Claims in the summary that did not hold:**
+- **1.1 (CI/CD) was reported resolved; it is unverified.** There is no `.github/` directory and no `cloudbuild.yaml` anywhere in the repo — both checked. A GCP-side Cloud Run continuous-deploy trigger is plausible, since its config lives outside the repo, but "pipeline exists and works" is currently an assumption. Left open rather than closed.
+- **The audit's status header said "11 of 13 P1 closed."** 11 + 3 deferred = 14. The resolved list had ten entries but two of them (2.10, 2.11) are bonus P2/P3. Corrected to 10.
+- Minor: `maybeMarkPreviewComplete` was described as living in `session.service.ts`; it is in `generationWorker.ts`.
+
+**Residuals named on otherwise-closed items** — none reopen the item, all now recorded:
+- **9.8 is a mitigation, not an elimination.** Three *consecutive* poll failures still surface to BullMQ, which retries the whole job and submits a second RunPod job while the first keeps running. The real elimination is writing `comfyJobId` at submit time instead of on success, so a retry can resume polling the existing job rather than resubmitting. Also, `fetch` carries no explicit timeout, so a hung connection sits on undici's default before the retry logic engages.
+- **11.1's sweeper is hygiene, not correctness.** `setInterval` needs CPU always-allocated on Cloud Run; layer 1 carries the guarantee.
+- **9.1 addressed the terminal-state transition, not the other two things the audit item named** — there is still no admin recovery endpoint, and a job lost from Redis entirely fires neither `completed` nor `failed`. Noted in passing: the expiry sweeper accidentally became a 24-hour dead-letter backstop for exactly that case, which makes it load-bearing in a way it was not designed to be.
+
+**Decisions made (all four put to Guts explicitly before any doc was edited):**
+- **The NEVER-DO on status-flip ordering is scoped, not reversed.** `triggerGeneration` keeps "flip AFTER enqueue" because a failed enqueue must leave the session re-runnable and able to reach the orphan-row recovery. `regeneratePage` flips BEFORE, because the worker runs at concurrency 5 and flipping afterwards races a fast page finishing — trading a stuck `FAILED` for a stuck `GENERATING_PREVIEW`. Two rules, each recorded with the failure it prevents.
+- **No rollback if `regeneratePage`'s enqueue throws.** `GENERATING_PREVIEW` is itself regeneratable so the user retrying re-enters the normal path, and a rollback would race a sibling regeneration that did enqueue successfully. Cost is one burned variant slot against the cap of 3, during a Redis outage.
+- **`FAILED`'s three meanings are documented, not fixed.** It now means generation-failed, expired-on-mutation, or expired-by-sweep. The frontend consequence is stated explicitly in `PROJECT_CONTEXT.md` §5: read `isExpired` before offering a retry, because `FAILED` is regeneratable but an expired session 409s on every attempt. A distinct `EXPIRED` enum value is the clean fix and is backlogged, not done.
+- **`CODE_VS_DOCS_AUDIT.md` is frozen at August 11.** Post-audit defects — including these two — live in `CURRENT_STATE.md` rather than being renumbered into it, so the audit stays reproducible as a point-in-time document.
+
+**Work done:**
+- **`generationWorker.ts`** — dropped `distinct`, load all terminal rows, reduce into `terminalPageIds` / `succeededPageIds` sets. Comment now explains why `distinct` is deliberately absent, so it does not get "optimised" back in.
+- **`session.service.ts`** — `regeneratePage` flips `FAILED → GENERATING_PREVIEW` via `updateMany` guarded on `status: "FAILED"`, placed between the variant-creation transaction and the enqueue. Ordering rationale and the no-rollback choice are in the comment.
+- **`PROJECT_CONTEXT.md`** — preview-completion rewritten for the two-set reduction; new bullet documenting both enqueue orderings side by side; §5 status list corrected (`FAILED` is live, `COMPLETED` is never-written-but-already-read by the two active-session guards); new block on the `FAILED` overload; §9 corrected on the `PATCH` expiry guard and the regeneration status list; session-lifetime section restructured into layer 1 / layer 2 with the Cloud Run caveat and the audit-9.3 interaction.
+- **`DECISIONS.md`** — NEVER-DO scoped with a pointer to the exception; new entries for the no-`distinct` rule and the `regeneratePage` flip; sweeper entry downgraded to hygiene-with-a-dependency; new entry on the `FAILED` overload; stale `⚠️ CONTRADICTORY` marker cleared from the seed entry (that one was a doc error already corrected — the marker convention means *code* needs to change).
+- **`CURRENT_STATE.md`** — new section for the two self-inflicted defects; new decided-and-deferred block; FIX LIST reordered with 8.3 first and the create/update-asymmetry items grouped as one pass; P2/P3 counts updated to ~34/~68; verify list rebuilt around the `FAILED` recovery round-trip.
+- **`CODE_VS_DOCS_AUDIT.md`** — count corrected to 10 of 13, 8.5 added to the resolved list, freeze notice added, placeholder date filled.
+
+**Mistakes caught:**
+- **Claude reported three doc locations as stale that had already been fixed.** `PROJECT_CONTEXT:177`, `DECISIONS:163`, and the `CURRENT_STATE` FIX LIST were called out as still describing the old `$transaction` design and still listing fixed P1s as open. They had already been updated. The claim came from a grep taken earlier in the session and was repeated without re-reading the files. Guts was told work remained that was already done — which is precisely the failure mode the audit exists to prevent, arrived at from the opposite direction. Re-read before reporting staleness; a grep result is a snapshot, not a live view.
+- **Nothing in this session was executed.** No typecheck exists in the project (`"types": []` plus `tsx`, audit 12.1) and no code was run. Every verification above, and both fixes, are confirmed by reading only. Stated plainly at the time rather than left implied, and now recorded in the `CURRENT_STATE.md` verify list.
+
+---
+
+## Session — August 11, 2026 — Full codebase audit against the four docs, then doc sync
+
+**Triggered by:** Guts asked for a complete read of the codebase, then a comparison against `PROJECT_CONTEXT.md`, `DECISIONS.md`, `CURRENT_STATE.md`, and `SESSION_LOG.md`, then for the docs to be brought in line with what the code actually does. **No application code was changed this session** — this was documentation work only.
+
+**What was read:** every file in `src/`, plus `prisma/schema.prisma`, all migrations, `api-workflow.json`, `Dockerfile`, `tsconfig.json`, `package.json`, and the four core docs. Skipped `venv/` and `src/generated/prisma/` (vendored deps and Prisma codegen).
+
+**Output:** `documents/CODE_VS_DOCS_AUDIT.md` — 125 numbered findings, grouped by file, priority-ordered within each file (P1 13 / P2 40 / P3 72), each tagged as **[Gap in code]**, **[Contradiction]**, or **[Not in docs]**. Items carry stable numbers (`8.9`, `11.1`) so they can be referenced from commits.
+
+**Features found in the code that had never been documented:**
+- **The whole `displayImageUrl` feature** — new schema column, migration, `buildDisplayImage` in `lib/image.ts`, `buildAndUploadDisplayImage` in the worker, and the resulting change to *both* contracts marked LOCKED for the frontend. The reasoning (27 MB six-page preview → ~250 KB per page) existed only as a code comment.
+- **Page reordering** — route, Zod schema, service, both 409 guards, and the two-phase negative renumber. Absent from the `PROJECT_CONTEXT.md` route map entirely.
+- **Re-entrant preview enqueue** — the orphan-QUEUED-row recovery. Both `CURRENT_STATE.md` and `DECISIONS.md` still listed this as an unresolved loose end; it has been built for some time.
+- **`GET /api/public/countries`** — active-countries endpoint, not in the public route list.
+- **`deleteComic` sweeping page assets** — the docs described it as cleaning thumbnails only.
+- Plus a long tail of undocumented behaviour now recorded: `app.ts` middleware ordering constraints, `trust proxy`, Better Auth cookie behaviour and the Facebook synthetic-email fallback, the nine different presigned-URL expiry windows, the mandatory R2 checksum flag, the error-code contract, `validateBody` applying Zod defaults, the inline query-validation pattern, `ASPECT_RATIO_TOLERANCE`, the `updatePage` resulting-state rule, BullMQ job retention, which `OrderSessionStatus` values are actually live, the full retained-but-unused field list, and the absence of any typecheck step.
+
+**Four loose ends closed by inspection** — all already implemented, still listed as open: orphan-row recovery, PATCH-only-artwork re-verifying a stale mask, partial bubble PATCH bounds, and the existence of `/api/admin/status`. `PROJECT_CONTEXT.md:76` tells a new session to trust `CURRENT_STATE.md` before assuming a task is done, so stale entries there actively cause redundant work.
+
+**Contradictions found and flagged (not fixed — code needs to change, not the decision):**
+- `.github/workflows/deploy.yml` is referenced twice but does not exist; there is no `.github/` directory at all.
+- `maybeMarkPreviewReady` was described in three separate docs as "locking the OrderSession row" and firing "exactly once." It uses a plain `findUnique` plus a status guard — no `SELECT ... FOR UPDATE`.
+- The same function was documented as counting against `Comic.freePreviewPages`. It counts `isPreviewPage: true` — **the code is right and the docs were wrong**, and following the docs would have reintroduced the exact drift bug the August 7 session fixed.
+- R2-before-DB delete ordering in `comic.service` and `page.service`, against a stated rule of DB-first.
+- The unauthenticated `GET /sessions/:id` returns `wsRoomToken`, collapsing the documented two-tier secret model.
+- `expiresAt` is documented as enforced "at query time / cleanup job"; no cleanup job exists and query-time handling only reports `isExpired`.
+- `R2_PUBLIC_URL_BASE` and `BETTER_AUTH_SECRET` are not in the `env.ts` required list, though §8 implied both were enforced.
+- `winston` is still a listed dependency despite being a never-do.
+- `server.listen()` passes no `"0.0.0.0"` despite §8 listing that as critical (works anyway — Node binds all interfaces).
+- `DECISIONS.md` described the seed conversion backwards.
+- Session route paths were written two different ways inside `PROJECT_CONTEXT.md`; only `/api/public/sessions/...` exists.
+
+**Doc edits made** — see the per-file summary in the chat response for this session. In short: `PROJECT_CONTEXT.md` gained the undocumented features and behaviours and had its wrong facts corrected; `DECISIONS.md` gained new finalized approaches and eight new SUPERSEDED entries; `CURRENT_STATE.md` was rewritten with a new CONTRADICTIONS section and a FIX LIST pointing at the audit; this log gained this entry.
+
+**Convention introduced:** contradictions are marked inline with `⚠️ CONTRADICTORY (Aug 11 audit)` rather than rewritten, because in each case the recorded decision is still the intent and the code is what needs to move. Clear the marker as each is fixed. Greppable across all four docs.
+
+**Decisions deferred to Guts:**
+- Nothing in the fix list was acted on. Guts explicitly wants to resolve the bugs first, then update the docs to match, rather than having the docs pre-emptively describe a fixed state.
+
+**Mistakes caught:**
+- Claude initially characterised the leftover controller `.parse()` calls as a live 500-instead-of-400 risk. They are unreachable — every one of those routes runs `validateBody` with the *same* schema first, so the second parse cannot fail. Corrected in the audit to "unreachable duplication that removes a safety net," which is a much lower priority.
+- Claude's first summary-count table in the audit file was wrong (claimed 103 items across P1/P2/P3). Recounted section by section after writing and corrected to 125, with a per-section breakdown added so the numbers are checkable rather than asserted.
+
+---
+
 ## Session — August 7, 2026 — Part E complete: full SD worker orchestration + supporting fixes + end-to-end verification
 
 **Triggered by:** Parts A–D of the SD worker were done and verified individually on August 3, but nothing was wired together. Guts wanted to build the full orchestration (Part E), verify it end-to-end with real RunPod jobs, and close out Part E. Ended up doing that plus five significant supporting fixes uncovered during testing, plus a full redesign of the GET /sessions/:id response for the frontend.
