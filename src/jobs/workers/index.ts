@@ -1,6 +1,7 @@
 import { logger } from "../../lib/logger.js";
 // import { hdWorker } from "./hdWorker.js";
 import { pdfWorker } from "./pdfWorker.js";
+import { shiprocketWorker } from "./shiprocketWorker.js";
 import { generationWorker } from "./generationWorker.js";
 import { sweepExpiredSessions } from "../../services/session.service.js";
 
@@ -13,7 +14,7 @@ export const initJobs = () => {
   logger.info("Initializing background job workers...");
 
   // Instantiate/activate the workers by referencing them
-  const workers = [generationWorker, pdfWorker];
+  const workers = [generationWorker, pdfWorker, shiprocketWorker];
 
   logger.info(`All ${workers.length} workers are actively listening to their respective queues.`);
 

@@ -56,7 +56,7 @@ export const deleteAddressHandler = asyncHandler(
 
     await deleteAddress(id, userId);
 
-    res.status(204).send();
+    sendSuccess(res, 200, null, "Address deleted");
   }
 );
 

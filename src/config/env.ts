@@ -22,6 +22,9 @@ const requriedVariables = [
   "BETTER_AUTH_SECRET",
   "RUNPOD_ENDPOINT_ID",
   "RUNPOD_API_KEY",
+  "RAZORPAY_KEY_ID",
+  "RAZORPAY_KEY_SECRET",
+  "RAZORPAY_WEBHOOK_SECRET",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -38,7 +41,7 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || "development",
   DATABASE_URL: process.env.DATABASE_URL,
   DIRECT_URL: process.env.DIRECT_URL,
-  googleId : process.env.GOOGLE_CLIENT_ID as string,
+  googleId: process.env.GOOGLE_CLIENT_ID as string,
   googleSecret: process.env.GOOGLE_CLIENT_SECRET as string,
   betterAuthUrl: process.env.BETTER_AUTH_URL as string,
   facebookId: process.env.FACEBOOK_CLIENT_ID as string,
@@ -58,5 +61,10 @@ export const config = {
   runpod: {
     endpointId: process.env.RUNPOD_ENDPOINT_ID as string,
     apiKey: process.env.RUNPOD_API_KEY as string,
-  }
+  },
+  razorpay: {
+    razorpayKeyId: process.env.RAZORPAY_KEY_ID!,
+    razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET!,
+    razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET!,
+  },
 };

@@ -41,3 +41,8 @@ export const pdfCompilationQueue = new Queue("pdf-compilation", {
   connection: redisClient,
   defaultJobOptions,
 });
+
+export const shiprocketQueue = new Queue("shiprocket", {
+  connection: redisClient,
+  defaultJobOptions,
+});

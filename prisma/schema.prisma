@@ -261,16 +261,18 @@ model PricingRule {
 enum OrderSessionStatus {
   CREATED
   PHOTO_UPLOADED
-  GENERATING_PREVIEW // pages 1–10 (free) generating
+  GENERATING_PREVIEW
   PREVIEW_READY
   AWAITING_PAYMENT
   PAID
-  GENERATING_PAID // pages 11–24 generating
+  GENERATING_PAID
   PAID_PAGES_READY
-  CONFIRMED // user selected variants for all 24 pages
+  CONFIRMED
   COMPILING_PDF
-  DISPATCHED
-  COMPLETED
+  PDF_FAILED
+  SHIPMENT_QUEUED
+  SHIPMENT_FAILED
+  COMPLETED 
   FAILED
 }
 
@@ -370,15 +372,15 @@ model PageVersion {
 // ============================================================
 
 enum OrderStatus {
-  CREATED
-  PAID
-  GENERATING
-  CONFIRMED
-  PDF_READY
-  DISPATCHED
-  DELIVERED
-  FAILED
-  REFUNDED
+  CREATED             // Order row created, Razorpay order created, awaiting payment
+  PAID                // Payment succeeded, paid-page generation in progress
+  GENERATED           // All paid pages ready, waiting for user to select variants + send-to-print
+  CONFIRMED           // User clicked send-to-print, PDF compiled, Shiprocket queued
+  SHIPROCKET_FAILED   // Shiprocket order creation exhausted retries, admin handles manually
+  READY_TO_SHIP       // Shiprocket order created, admin fills dims + generates AWB
+  SHIPPED             // AWB generated, package handed to courier
+  DELIVERED           // Shiprocket webhook confirmed delivery
+  CANCELLED           // Manual admin cancellation (edge case)
 }
 
 model Order {

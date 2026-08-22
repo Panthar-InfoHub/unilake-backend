@@ -10,6 +10,7 @@ import { randomUUID } from "crypto";
 import { redisClient } from "../../lib/redis.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
+import { maybeMarkPaidReady } from "../../services/session.service.js";
 import {
   uploadFile,
   getPublicUrl,
@@ -20,6 +21,7 @@ import {
   emitPageReady,
   emitPageError,
   emitSessionPreviewReady,
+  emitSessionPaidReady
 } from "../../websocket/event.js";
 import { stampTextOnPage } from "./sd/textStamp.js";
 import { buildWorkflow } from "./sd/workflow.js";
@@ -551,6 +553,29 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
       emitSessionPreviewReady(sessionId);
     }
 
+    // === 9. CHECK IF THIS WAS THE LAST PAID PAGE ===
+    //
+    // Same race-safety story as the preview check. Both helpers fire on every
+    // page completion — the one whose filter (isPreviewPage) does not match
+    // this page's kind returns "not-done" and does nothing. Cleaner than
+    // routing at the worker level.
+    //
+    // Success path can only ever produce "ready" or "not-done" here.
+    const paidResult = await maybeMarkPaidReady(
+      sessionId,
+      orderSession.comicId
+    );
+
+    if (paidResult === "ready") {
+      logger.info(
+        { sessionId },
+        "[SD Worker] All paid pages done — session marked PAID_PAGES_READY, Order marked GENERATED"
+      );
+      emitSessionPaidReady(sessionId);
+      // TODO: notify user — send "your comic is ready" email once the
+      // notification layer exists.
+    }
+    
     logger.info(
       {
         jobId: job.id,
@@ -664,6 +689,31 @@ generationWorker.on("failed", async (job, err) => {
         "[SD Worker] Session marked PREVIEW_READY from failure handler (last page failed but earlier pages covered the total)"
       );
       emitSessionPreviewReady(pageVersion.orderSessionId);
+    }
+    // Mirror check for paid pages. Same rationale as the preview branch
+    // above — the helper whose isPreviewPage filter doesn't match this
+    // page will no-op.
+    const paidResult = await maybeMarkPaidReady(
+      pageVersion.orderSessionId,
+      pageVersion.orderSession.comicId
+    );
+
+    if (paidResult === "failed") {
+      logger.error(
+        { sessionId: pageVersion.orderSessionId },
+        "[SD Worker] All paid pages final-failed — session marked FAILED, Order left at PAID for admin review"
+      );
+      // No WebSocket emit — matches preview failure handling. Frontend
+      // picks it up via page:error + GET /sessions/:id.
+    } else if (paidResult === "ready") {
+      // Same edge case as above but for paid: this page failed, earlier
+      // successes already covered the total.
+      logger.info(
+        { sessionId: pageVersion.orderSessionId },
+        "[SD Worker] Session marked PAID_PAGES_READY from failure handler (last page failed but earlier pages covered the total)"
+      );
+      emitSessionPaidReady(pageVersion.orderSessionId);
+      // TODO: notify user — same "your comic is ready" email as the success path.
     }
   } catch (handlerErr) {
     // A crash inside the terminal-failure handler must not itself crash the

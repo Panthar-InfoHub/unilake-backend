@@ -11,6 +11,7 @@ import adminRoutes from "./routes/admin.js";
 import publicRouter from "./routes/public.js";
 import userRouter from "./routes/user.js";
 import { requireLoggedIn } from "./middlewares/requireLoggedIn.js";
+import webhookRouter from "./routes/webhooks.js";
 
 (BigInt.prototype as any).toJSON = function () {
   return this.toString();
@@ -39,6 +40,11 @@ app.use(
 );
 app.use(helmet());
 app.all("/api/auth/*splat", toNodeHandler(auth));
+
+// Webhooks must be mounted BEFORE express.json() so signature verification
+// can read the exact raw bytes as sent by the provider. Same pattern as Better Auth.
+app.use("/api/webhooks", express.raw({ type: "application/json" }), webhookRouter);
+
 app.use(express.json());
 
 app.get("/health", (req, res) => {

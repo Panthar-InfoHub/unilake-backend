@@ -73,6 +73,12 @@ Never suggest old MediaPipe mp.solutions API — fully removed in installed vers
 Never suggest Python versions other than 3.11.x for the venv.
 Never re-propose pupil-shape or frame-bridge-uniformity for sunglasses detection.
 Never suggest building validateParams middleware.
+Never suggest mounting the webhook router after express.json() — Razorpay signature verification needs the exact raw bytes.
+Never suggest a standalone per-page variant-select endpoint — selection commits as one batch at send-to-print.
+Never suggest sending the shipping address in the checkout request body — checkout reads it off the session.
+Never suggest storing the customer-facing order status — it is derived from OrderStatus via toPublicStatus().
+Never suggest hardcoding × 100 for payment amounts — use toSmallestUnit(amount, currency).
+Never suggest a client-side payment-verify endpoint — the Razorpay webhook is the sole trigger.
 Never assume a task is done just because it was discussed — check CURRENT_STATE.md.
 
 
@@ -101,12 +107,12 @@ Never assume a task is done just because it was discussed — check CURRENT_STAT
 | ComfyUI | External, RunPod-hosted | AI image generation | API-calling only, no infra work. Endpoint `bwdfkrlaocqm3o` on client's account. |
 | `ws` (npm) | — | WebSocket | `{ noServer: true }` for pre-handshake auth. Rooms via in-memory `Map` |
 | Docker | `node:22-bookworm-slim` | Container | Multi-stage build, Python stripped. Final ~250MB |
-| Google Cloud Run | `asia-south1` | Hosting | `--min-instances 1`, `--max-instances 1`, `--timeout 3600` |
+| Google Cloud Run | `asia-south1` | Hosting | `--min-instances 1`, `--max-instances 1`, `--timeout 3600`. **RAM tier needs bump to 2 GB (agreed Aug 21, not yet applied)** — PDF worker concurrency 5 × ~120 MB peak per job requires headroom. Must land before production traffic hits `compilePdfForSession`. |
 | Google Artifact Registry | `unilake-images` in `asia-south1` | Docker registry | — |
 | Auto-deploy (method TBD) | GCP-side config | CI/CD | Push to `main` → automatic deploy to Cloud Run. Confirmed working. Exact configuration path (Cloud Build trigger / Cloud Run continuous deploy / GitHub Actions) needs verification in GCP Console → Cloud Run → service → Continuous deployment. Old references to `.github/workflows/deploy.yml` and secrets `GCP_SA_KEY` / `GCP_PROJECT_ID` / `GCP_REGION` were inaccurate. |
-| Razorpay | — | Payments | International = separate account setup |
+| Razorpay | `razorpay` npm SDK | Payments | Integrated Aug 19. Singleton + `toSmallestUnit()` + `verifyWebhookSignature()` in `src/lib/razorpay.ts`. Webhook-only (no client-side verify endpoint). Currency-agnostic by design. International account still awaiting client approval. |
 | Shiprocket | — | Shipping | Country name format vs ISO codes = unresolved |
-| pdf-lib | Planned | PDF compilation | Not yet used |
+| pdf-lib | Installed Aug 21 | PDF compilation | Used in `compilePdfForSession` (session.service) and `pdfWorker`. Embeds JPEG-converted page images sized to source dimensions. |
 | Apidog | — | API testing | Not automated tests |
 
 ---
@@ -121,9 +127,11 @@ Never assume a task is done just because it was discussed — check CURRENT_STAT
 
 **Middleware order in `app.ts` (load-bearing — do not reorder):**
 1. `app.set("trust proxy", 1)` — required on Cloud Run so client IPs and the `secure` cookie flag resolve correctly behind the load balancer.
-2. `pinoHttp` → `cors` → **Better Auth handler** → `express.json()` → `helmet()`.
-3. The Better Auth handler sits **above** `express.json()` on purpose — Better Auth needs the raw request body. Moving `express.json()` above it breaks authentication.
-4. `helmet()` runs after the auth route, so `/api/auth/*` responses do not receive helmet headers.
+2. Actual order as of Aug 19: `pinoHttp` → `cors` → `helmet()` → **Better Auth handler** → **`/api/webhooks` with `express.raw({ type: "application/json" })`** → `express.json()` → `/health` → route mounts → `errorHandler`.
+3. **Two handlers sit above `express.json()`, both because they need raw bytes:**
+   - The Better Auth handler — Better Auth reads the raw request body. Moving `express.json()` above it breaks authentication.
+   - The webhook router — Razorpay's HMAC-SHA256 signature is computed over the exact bytes on the wire. `express.json()` parses and re-serializes, which changes them byte-for-byte and makes every signature fail. `express.raw()` hands the controller a `Buffer`.
+4. **⚠️ CONTRADICTORY (Aug 19):** `helmet()` now runs **before** the Better Auth handler, so `/api/auth/*` responses *do* receive helmet headers. The prior decision put helmet last specifically so they would not. Nobody recorded moving it and it is unclear whether the reorder was deliberate — on the fix list until confirmed either way.
 5. `GET /health` returns a plain string, not the `sendSuccess` envelope — the one deliberate exception to the envelope rule.
 
 **BigInt serialization:** `app.ts` patches `BigInt.prototype.toJSON` to return `.toString()`. Native `JSON.stringify` can't handle BigInt values; `PageVersion.seed` is the only BigInt field in the schema. Frontend must type `seed` as `string | null` if consumed.
@@ -252,6 +260,45 @@ app.use("/api/public", publicRouter);
 - Address snapshotted into BOTH `OrderSession.shipping*` AND `Order.shipping*`. No FK to `SavedAddress`.
 - Payment retry: only pre-payment on same browser page. Post-payment failures = admin responsibility.
 
+**Checkout & payments (built Aug 19 — code-complete, never exercised against a real payment):**
+
+- **Order row is created at checkout initiation, not at payment success.** An abandoned checkout leaves a cheap, filterable `CREATED` row and makes a future "resume payment" flow possible.
+- **`initiateCheckout(sessionId)` guard order:** session exists → `assertNotExpired` → status is `PREVIEW_READY` → `userId` attached → `coverType` set → all seven shipping fields present (`assertShippingComplete`). Then country lookup → pricing lookup → Razorpay order → DB write.
+- **Idempotent on re-call:** an existing `Order` at `CREATED` is reused and its Razorpay order id returned unchanged. An existing order at any later status 409s — the user has already paid or moved past checkout.
+- **Country is looked up by `Country.code` (ISO alpha-2) from `session.shippingCountry`**, and the price currency comes from `Country.currencyCode`. Inactive countries are rejected with a 400. `isInternational` is snapshotted as `country.code !== "IN"`.
+- **Pricing comes from `PricingRule(comicId, countryId, coverType)`.** A missing rule is a configuration gap, not a user error — it logs at `error` and returns 404.
+- **The Razorpay order is created OUTSIDE the transaction**, then the `Order` row and the `PREVIEW_READY → AWAITING_PAYMENT` session flip happen INSIDE one `$transaction`. Same DB-vs-external-system rule as the BullMQ enqueue. If the DB write fails afterwards, the Razorpay order is orphaned and logged; Razorpay auto-expires unused orders after 15 minutes.
+- **Amounts are currency-agnostic.** `toSmallestUnit(amount, currency)` in `src/lib/razorpay.ts` handles 0-decimal (`JPY`, `KRW`, `VND`, `CLP`, `ISK`, `TWD`), 3-decimal (`BHD`, `KWD`, `OMR`, `JOD`) and the 2-decimal default. There is no hardcoded `× 100` anywhere. Adding a country is a DB row, not a deploy.
+- **Checkout response:** `{ orderId, razorpayOrderId, razorpayKeyId, amount, currency, displayAmount, notificationEmail }`. `amount` is in the smallest unit for the Razorpay modal; `displayAmount` is the major-unit string for the UI.
+- **Address never travels in the checkout body.** The frontend PATCHes the shipping fields onto the `OrderSession` when the user picks an address; checkout reads them from session state and snapshots them onto `Order`.
+
+**Razorpay webhook (`POST /api/webhooks/razorpay`):**
+- **Signature verification first**, HMAC-SHA256 over the raw `Buffer` using `RAZORPAY_WEBHOOK_SECRET`, compared with `crypto.timingSafeEqual`. Length mismatch short-circuits to `false`; the whole helper is wrapped so a malformed hex signature returns `false` rather than throwing.
+- **Missing/invalid signature and malformed JSON return 400** via `WebhookVerificationError` — 400 tells Razorpay to stop retrying, because none of those are transient. Any *other* error is re-thrown so Razorpay retries.
+- **Idempotency at two layers.** Transport: a `WebhookEvent` row keyed on `eventId @unique` (the Razorpay payment id, falling back to the order entity id); a `P2002` on insert means duplicate delivery and returns early. Business: `payment.captured` no-ops if the local `Order` is already past `CREATED`.
+- **Only `payment.captured` changes state.** `payment.failed` logs a warning with the Razorpay error code/description for support and changes nothing — the user simply retries. Every other event type, including `order.paid`, is logged and ignored as redundant.
+- **`payment.captured` flow:** find `Order` by `razorpayOrderId` (`@unique`) → backfill `WebhookEvent.orderId` (best-effort, `.catch()`-swallowed) → `$transaction` flipping `Order → PAID` (+ `razorpayPaymentId`) and `OrderSession → PAID`, both via `updateMany` with a status guard → **enqueue paid-page generation OUTSIDE the transaction** → flip session to `GENERATING_PAID`.
+- **The `PAID → GENERATING_PAID` flip is a deliberate two-step**, same shape as `triggerGeneration`: if Redis is down, the session rests at `PAID` rather than claiming generation started. **⚠️ But the recovery path that justifies it does not exist** — the code comment says "PAID is regeneratable per DECISIONS" and `PAID` is *not* in `REGENERATABLE_STATUSES`. A failed enqueue currently strands the session with no route out. On the fix list.
+- **A payment with no matching local `Order`** logs at `error` as an orphan payment needing admin follow-up. It does not throw, so Razorpay is not made to retry something that will never resolve.
+
+**Paid-page generation (`enqueuePaidGenerationJobs`):** a faithful mirror of `enqueuePreviewGenerationJobs` with the filter inverted to `isPreviewPage: false` — same orphan-row recovery, same `$transaction` insert, same enqueue-after-commit, same `computeJobPriority`. Lives at the bottom of `session.service.ts` and is exported for `webhook.service.ts`.
+
+**Paid-page completion (`maybeMarkPaidReady`, added Aug 21):** mirror of `maybeMarkPreviewComplete` scoped to `isPreviewPage: false`. Runs after every terminal `PageVersion` transition. Counts total paid pages, reduces every terminal paid-page row into `terminalPageIds` and `succeededPageIds` sets, and flips two rows together inside one `$transaction`: session `GENERATING_PAID → PAID_PAGES_READY` (status-guarded) plus Order `PAID → GENERATED` (status-guarded, success branch only). Success-wins semantics: any single `SD_READY` variant flips the session to `PAID_PAGES_READY`; only flips to `FAILED` when every paid page has final-failed. On all-page-failure, Order deliberately stays at `PAID` — refund/cancel is an explicit ops decision, never automatic. Wired into `generationWorker.ts` alongside the existing `maybeMarkPreviewComplete` call; whichever helper's `isPreviewPage` filter does not match the finished page returns `not-done` and no-ops. Emits `session:paid-ready` on success.
+
+**Order status model:**
+- **`OrderStatus` (9 values, internal):** `CREATED → PAID → GENERATED → CONFIRMED → {SHIPROCKET_FAILED} → READY_TO_SHIP → SHIPPED → DELIVERED`, plus `CANCELLED`. Replaced the old enum in migration `20260818214132_update_order_status_enum`; the migration was free because no `Order` rows existed.
+- **The customer-facing status is derived, never stored.** `toPublicStatus()` in `src/utils/orderStatusMapping.ts` collapses the 9 internal values into 7 strings (`"Awaiting payment"`, `"Comic being created"`, `"Awaiting your selection"`, `"Printing"`, `"Shipped"`, `"Delivered"`, `"Cancelled"`). `CONFIRMED`, `SHIPROCKET_FAILED` and `READY_TO_SHIP` all read as `"Printing"` — the Shiprocket failure is an ops concern, not a customer one. Renaming a public stage is a one-line change with no migration.
+
+**Session state chain post-CONFIRMED (added Aug 21):**
+
+CONFIRMED → COMPILING_PDF ─┬→ PDF_FAILED (terminal, admin retry)
+└→ SHIPMENT_QUEUED ─┬→ SHIPMENT_FAILED (terminal, admin retry)
+└→ COMPLETED (session done; Order carries post-handoff state)
+
+CONFIRMED → COMPILING_PDF ─┬→ PDF_FAILED (terminal, admin retry)
+└→ SHIPMENT_QUEUED ─┬→ SHIPMENT_FAILED (terminal, admin retry)
+└→ COMPLETED (session done; Order carries post-handoff state)
+
 **Snapshot + stream pattern for frontend sync:**
 - `GET /sessions/:id` returns the complete snapshot: session state + all comic pages + all variants nested.
 - WebSocket streams deltas during active generation: `page:ready`, `page:error`, `session:preview-ready`.
@@ -282,7 +329,11 @@ app.use("/api/public", publicRouter);
 
 **Enums:** `AgeGroup`, `CoverType`, `GenderTag`, `ComicStatus`, `OrderSessionStatus`, `PronounKey`, `PageVersionStatus`, `OrderStatus`, `FeedbackStatus`.
 
-**Which `OrderSessionStatus` values are live:** `CREATED`, `PHOTO_UPLOADED`, `GENERATING_PREVIEW`, `PREVIEW_READY`, and `FAILED` are written by current code. `AWAITING_PAYMENT`, `PAID`, `GENERATING_PAID`, `PAID_PAGES_READY`, `CONFIRMED`, `COMPILING_PDF`, and `DISPATCHED` are reserved for features not yet built. `COMPLETED` is never written either, but is already read — both `deleteComic` and `reorderComicPages` treat `COMPLETED` and `FAILED` as the terminal statuses that do not block. `OrderStatus` is entirely reserved — nothing writes it.
+**Which `OrderSessionStatus` values are live (updated Aug 21):** `CREATED`, `PHOTO_UPLOADED`, `GENERATING_PREVIEW`, `PREVIEW_READY`, `FAILED`, `AWAITING_PAYMENT` (written by `initiateCheckout`), `PAID` and `GENERATING_PAID` (both written by the Razorpay webhook), `PAID_PAGES_READY` (written by `maybeMarkPaidReady`, added Aug 21), `CONFIRMED` (written by `sendToPrint`, added Aug 21), `COMPILING_PDF` and `SHIPMENT_QUEUED` (both written by `compilePdfForSession`, added Aug 21), and `COMPLETED` (written by the stub Shiprocket worker, added Aug 21 — will move to real Shiprocket in feature #4). Terminal failure branches `PDF_FAILED` and `SHIPMENT_FAILED` (added Aug 21) are written by their respective worker `failed` handlers after BullMQ exhausts retries. **Removed from the enum Aug 21:** `DISPATCHED` — replaced by the `SHIPMENT_QUEUED → COMPLETED` split. `deleteComic` and `reorderComicPages` still treat `COMPLETED` and `FAILED` as the terminal statuses that do not block; the new failure states are terminal too and should be added to those guards when admin retry endpoints land.
+
+**`OrderStatus` (rewritten Aug 19, migration `20260818214132_update_order_status_enum`):** `CREATED`, `PAID`, `GENERATED`, `CONFIRMED`, `SHIPROCKET_FAILED`, `READY_TO_SHIP`, `SHIPPED`, `DELIVERED`, `CANCELLED`. Currently written: `CREATED` (checkout), `PAID` (webhook), `GENERATED` (`maybeMarkPaidReady`, Aug 21), `CONFIRMED` (send-to-print, Aug 21). The rest wait on real Shiprocket (feature #4) and the delivery webhook. Removed in the rewrite: `GENERATING` (collapsed into `PAID`), `PDF_READY` (merged into `CONFIRMED`), `DISPATCHED` (renamed `SHIPPED`), `FAILED` (not in the flow), `REFUNDED` (no-refund policy).
+
+**Session vs Order past `CONFIRMED`** — the two do not move in lockstep. Session transitions through `COMPILING_PDF → SHIPMENT_QUEUED → COMPLETED` (where `COMPLETED` = handed off to courier). Order stays at `CONFIRMED` through PDF compilation, then feature #4 will move it to `READY_TO_SHIP` when real Shiprocket accepts the shipment, and through `SHIPPED`/`DELIVERED` on courier/delivery webhooks. Session's job ends at courier handoff; post-handoff state lives on Order.
 
 **⚠️ `FAILED` is overloaded — it currently means three different things:**
 1. **Generation failed** — every preview page exhausted its BullMQ attempts, written by `maybeMarkPreviewComplete`.
@@ -295,7 +346,9 @@ Consequences to be aware of:
 
 A distinct `EXPIRED` enum value would remove the ambiguity for the cost of one migration plus updates to `assertNotExpired`, `sweepExpiredSessions`, `REGENERATABLE_STATUSES`, and the two active-session guards. On the backlog, not yet done.
 
-**Models with no code touching them yet:** `Order`, `WebhookEvent`, `SystemConfig`. Schema-only, waiting on payments and shipping.
+**Models with no code touching them yet:** `SystemConfig` only. `Order` and `WebhookEvent` came alive on Aug 19 with checkout and the Razorpay webhook.
+
+**Paid sessions are exempt from expiry (fixed Aug 21, Bug 1).** `session.service.ts` exports `EXPIRY_EXEMPT_STATUSES` = `AWAITING_PAYMENT` + `POST_PAYMENT_STATUSES` (`PAID`, `GENERATING_PAID`, `PAID_PAGES_READY`, `CONFIRMED`, `COMPILING_PDF`, `SHIPMENT_QUEUED`, `COMPLETED`). Checked in four places: both `assertNotExpired` copies (`session.service.ts` and the private duplicate in `checkout.service.ts`), the `sweepExpiredSessions` `notIn` clause, and the `isExpired` computation returned by `getOrderSessionId`. `expiresAt` is left as-is (24 h from creation) — the exemption is what changes, not the timestamp. Accepted tradeoff: abandoned `AWAITING_PAYMENT` sessions live forever with no cleanup — the alternative (killing a session mid-payment when the customer takes >24 h from creation to complete Razorpay) was strictly worse. Cleanup for abandoned checkouts is a separate future concern.
 
 **Naming exception:** `Country` has no `@@map`, so its table is `Country` while every other domain table is snake_case (`comics`, `pages`, `bubbles`, `order_sessions`, `page_versions`, `pricing_rules`). Changing it now needs a rename migration.
 
@@ -316,7 +369,11 @@ A distinct `EXPIRED` enum value would remove the ambiguity for the cost of one m
 - `Comic.publishJobId`, `Comic.publishError` — dead since publish became a synchronous status flip.
 - `Page.mirrorFace`, `Page.faceDirection` — **stored, validated in Zod, and editable through the admin API, but read by nothing.** The worker never reads them and `buildWorkflow` never receives them. An admin UI built from the schema will surface controls that have no effect.
 - `OrderSession.photoScoreJson` — dead since photo validation moved to the frontend. Excluded from the GET response.
-- `PageVersion.isSelected` — read and returned, but nothing writes it yet; waiting on the confirm endpoint.
+- `PageVersion.isSelected` — written by `sendToPrint` (Aug 21) in the atomic selection commit at send-to-print. Every variant is born `false`; only the customer's chosen variant per page gets flipped to `true`, in one transaction covering every page.
+- `Order.printVendorOrderId` — leftover from an earlier Gelato evaluation. Nullable, unused, kept rather than migrated away. Rainy-day tidy.
+- `Order.pdfUrl` and `pdfDownloadUrl` — written by `compilePdfForSession` (Aug 21). `pdfUrl` stores the R2 key (`pdfs/{sessionId}.pdf`); `pdfDownloadUrl` stores the permanent public URL from `getPublicUrl()`.
+- `Order.pdfDownloadExpiry` — schema field retained but always `null`. The PDF now lives in the R2 public bucket at a UUID-keyed path, so public URLs don't expire. Kept in case the client reverses to signed URLs later.
+- `Order.shiprocketOrderId`, `awbNumber`, `courierName`, `trackingStatus`, `trackingUpdatedAt` — read and returned by the customer order endpoints, none written yet. Wait on real Shiprocket integration (feature #4). Stub Shiprocket worker flips session to `COMPLETED` but does not touch Order.
 
 ---
 
@@ -336,14 +393,16 @@ REST. Middleware: `validateBody`, `requireAdmin`, `requireLoggedIn`, `errorHandl
 - **CustomerReview:** upload-URL, POST, status toggle, list, DELETE (with R2 cleanup)
 - **TeamMember:** upload-URL, POST, PATCH (with R2 cleanup), status toggle, list, DELETE (with R2 cleanup), plus `GET /team-members/active` (admin-side duplicate of the public endpoint)
 - **Feedback:** list (?status), PATCH status, DELETE
-- **Orders:** list, detail (planned)
+- **Orders:** list, detail — still planned. Must also carry a `SHIPROCKET_FAILED` filtered view for manual handling, and admins are meant to see sessions in every status from `PAID` onward including the in-progress selection stage. No real-time notification; the DB row is enough.
 - **`GET /admin/status`** — guard smoke-test endpoint. Returns `{ success, message, adminEmail }`. Confirmed present; the frontend integration guide's reference to it is correct.
 - **No update endpoint exists for `HeroImage` or `CustomerReview`** — create, toggle status, and delete only. Editing means delete and recreate (and re-upload the asset).
 
 ### Customer routes (`requireLoggedIn`)
-- `/api/user/addresses` — GET (list), POST (create, auto-default first), PATCH (update, ownership check), DELETE (ownership check, default promotion), POST set-default ($transaction)
-- `/api/user/orders` — GET list, GET detail (planned)
-- `POST /api/public/sessions/:id/checkout`, `POST /api/public/sessions/:id/confirm` (planned)
+- `/api/user/addresses` — GET (list), POST (create, auto-default first), PATCH (update, ownership check), DELETE (ownership check, default promotion — now returns `sendSuccess(200, null)`, not a bare 204), POST set-default ($transaction)
+- `GET /api/user/orders` — list of the caller's orders, newest first. Curated card shape: `{ id, sessionId, comic, coverType, amount (string), currency, publicStatus, trackingStatus, createdAt }`. No gateway or admin internals.
+- `GET /api/user/orders/:id` — single order with ownership check (403 + `logger.warn` on mismatch). Adds the shipping snapshot, `pdfDownloadUrl`/`pdfDownloadExpiry`, `courierName`, `awbNumber`, `updatedAt`. `razorpayPaymentId`, `shiprocketOrderId` and the raw `status` are deliberately excluded — the client sees `publicStatus` only.
+- **⚠️ Both order endpoints are broken as written (Aug 19).** They `select` `comic.coverImageUrl`, a field that does not exist on `Comic` (it is `coverThumbnailUrls String[]`), so Prisma throws on the first call. No typecheck exists to catch it. On the fix list.
+- **(Aug 21) `POST /api/user/sessions/:sessionId/send-to-print`** — built. Note the mount path: `/api/user`, not `/api/public` — the endpoint requires auth because the customer must own the session by this point. Body: `{ selections: [{ pageNumber, variantIndex }] }`, one entry per page (all pages, preview + paid). Full flow: guards → in-flight variant check (rejects if any `PageVersion` for the session is non-terminal, not just the selected ones) → per-selection validation (variant must exist and be `SD_READY`) → atomic `$transaction` (mark `isSelected: true` on chosen variants + flip session `PAID_PAGES_READY → CONFIRMED` + flip Order `GENERATED → CONFIRMED`) → enqueue PDF compilation with `jobId: sessionId` for BullMQ dedupe. Idempotent: second call at `CONFIRMED` re-enqueues the PDF job and returns success without status change. Handles the "DB commit succeeded → enqueue failed → customer retries" case cleanly. Response: `{ sessionId, orderId, status: "CONFIRMED", pdfCompilationEnqueued: true }`.
 
 ### Public routes
 - `GET /api/public/comics` (filters), `GET /api/public/comics/:id` (includes description, ageGroup, isBestseller, theme, coverType pricing, `coverThumbnailUrls` array, and preview pages with `artworkUrl` + `artworkWidth`/`artworkHeight` so the carousel can reserve the right aspect-ratio box before load)
@@ -358,12 +417,13 @@ REST. Middleware: `validateBody`, `requireAdmin`, `requireLoggedIn`, `errorHandl
   - `POST /api/public/sessions/:id/photo/confirm` (accepts `{ key }`; flips status to `PHOTO_UPLOADED`; allows re-confirm from `PHOTO_UPLOADED`)
   - `POST /api/public/sessions/:id/generate` (kicks off preview generation for all `isPreviewPage: true` pages)
   - `POST /api/public/sessions/:id/pages/:pageNumber/regenerate` (single-page, transactional variant-index)
+  - `POST /api/public/sessions/:sessionId/checkout` — creates the Razorpay order + the `Order` row, flips session to `AWAITING_PAYMENT`. No request body. Idempotent while the order is `CREATED`. Returns `{ orderId, razorpayOrderId, razorpayKeyId, amount, currency, displayAmount, notificationEmail }`. Note: `checkoutParamsSchema` (UUID) exists in `src/validators/checkout.schema.ts` but **is imported by nothing** — the controller only does an inline `typeof === "string"` check, so a malformed sessionId reaches the DB query instead of returning 400.
 - `PATCH /api/public/sessions/:id/attach-user` (requireLoggedIn inline)
 - WebSocket: `ws://.../?sessionId=&token=`
 
-### Webhooks — planned
-- `POST /api/webhooks/razorpay` (signature verification)
-- `POST /api/webhooks/shiprocket` (signature/token)
+### Webhooks (mounted with `express.raw`, above `express.json()`)
+- `POST /api/webhooks/razorpay` — **built.** HMAC-SHA256 signature verification, `WebhookEvent` dedupe, `payment.captured` handling. Returns `{ received: true }` 200 on success, 400 on signature/parse failure so Razorpay stops retrying, and re-throws anything else so Razorpay *does* retry.
+- `POST /api/webhooks/shiprocket` — planned (signature/token).
 
 ### Auth
 - `ALL /api/auth/*splat` (Better Auth handler, both admin + customers)
@@ -408,6 +468,7 @@ Internal fields (`seed`, `textStampedUrl`, `comfyJobId`, `steps`, `cfg`, `pagePr
 - `page:ready` → `{ type: 'page:ready', pageNumber, variantIndex, imageUrl, displayImageUrl, pageVersionId }`
 - `page:error` → `{ type: 'page:error', pageNumber, variantIndex, errorMessage }`
 - `session:preview-ready` → `{ type: 'session:preview-ready' }` (no payload)
+- `session:paid-ready` → `{ type: 'session:paid-ready' }` (no payload, added Aug 21) — fires when `maybeMarkPaidReady` flips the session from `GENERATING_PAID` to `PAID_PAGES_READY`. Same "no session-level event on failure" convention as preview.
 
 `imageUrl` remains the print master so the event shape stays backward compatible; `displayImageUrl` is the web-sized WebP and is `string | null` with the same fallback rule as the GET response. The idempotency re-emit path sends both fields too.
 
@@ -437,17 +498,18 @@ unilake-backend/
 │ ├── config/{env,generation}.ts + constants.ts (EMPTY, unused) + workflows/api-workflow.json
 │ ├── scripts/ # LEGACY — kept for now
 │ ├── test-job.ts # Stale dev helper — enqueues { prompt, sessionId, userId }, a payload the worker no longer reads
-│ ├── routes/{admin,public,user}.ts
-│ ├── controllers/ # comic, country, session, page, bubble, font, theme, announcement, heroImage, customerReview, teamMember, feedback, savedAddress
-│ ├── services/ # Same set + photoValidation (LEGACY, no longer called)
-│ ├── validators/ # Zod schemas, one per feature + savedAddress
+│ ├── routes/{admin,public,user,webhooks}.ts
+│ ├── controllers/ # comic, country, session, page, bubble, font, theme, announcement, heroImage, customerReview, teamMember, feedback, savedAddress, checkout, order, webhook
+│ ├── services/ # Same set + checkout, order, webhook + photoValidation (LEGACY, no longer called)
+│ ├── validators/ # Zod schemas, one per feature + savedAddress + checkout + sendToPrint (Aug 21). checkout.schema.ts wired Aug 21.
 │ ├── middlewares/ # errorHandler, requireAdmin, requireLoggedIn, validateBody
-│ ├── lib/ # prisma, redis, r2, image (Sharp probe), logger, auth
+│ ├── lib/ # prisma, redis, r2, image (Sharp probe), logger, auth, razorpay
 │ ├── jobs/
-│ │ ├── queues.ts # sd-generation, pdf-compilation (hd-generation commented)
+│ │ ├── queues.ts # sd-generation, pdf-compilation, shiprocket (hd-generation commented)
 │ │ └── workers/
-│ │ ├── generationWorker.ts # Full pipeline: fetch → stamp → fork on hasFace → RunPod (face) or re-upload (non-face) → SD_READY → emit → PREVIEW_READY check
-│ │ ├── pdfWorker.ts # STUB — worker listens, but nothing anywhere enqueues to pdf-compilation
+│ │ ├── generationWorker.ts # Full pipeline: fetch → stamp → fork on hasFace → RunPod (face) or re-upload (non-face) → SD_READY → emit → PREVIEW_READY + PAID_PAGES_READY checks
+│ │ ├── pdfWorker.ts # Aug 21: real. Thin wrapper calling compilePdfForSession. Failure handler flips session to PDF_FAILED after all retries exhausted.
+│ │ ├── shiprocketWorker.ts # Aug 21: STUB — flips session SHIPMENT_QUEUED → COMPLETED. Feature #4 replaces the body.
 │ │ ├── hdWorker.ts # commented out
 │ │ ├── index.ts # initJobs, worker shutdown handlers (does not close server/Redis or exit)
 │ │ └── sd/
@@ -459,8 +521,8 @@ unilake-backend/
 │ ├── websocket/
 │ │ ├── wsServer.ts # setupWebSocket, noServer:true handshake auth
 │ │ ├── rooms.ts # joinRoom, leaveRoom, getRoom
-│ │ └── event.ts # emitPageReady, emitPageError, emitSessionPreviewReady
-│ ├── utils/{errors, asyncHandler, response}.ts
+│ │ └── event.ts # emitPageReady, emitPageError, emitSessionPreviewReady, emitSessionPaidReady (Aug 21)
+│ ├── utils/{errors, asyncHandler, response, orderStatusMapping}.ts
 │ └── types/express.d.ts
 ├── .env / .env.example
 └── package.json
@@ -469,9 +531,11 @@ unilake-backend/
 
 ## 8. ENVIRONMENT
 
-**Env vars used by the app:** `PORT` (8080), `DATABASE_URL`, `DIRECT_URL`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET_NAME`, `R2_PUBLIC_BUCKET_NAME`, `R2_ENDPOINT`, `R2_PUBLIC_URL_BASE`, `REDIS_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET`, `NODE_ENV`, `RUNPOD_ENDPOINT_ID`, `RUNPOD_API_KEY`.
+**Env vars used by the app:** `PORT` (8080), `DATABASE_URL`, `DIRECT_URL`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET_NAME`, `R2_PUBLIC_BUCKET_NAME`, `R2_ENDPOINT`, `R2_PUBLIC_URL_BASE`, `REDIS_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `FACEBOOK_CLIENT_ID`, `FACEBOOK_CLIENT_SECRET`, `NODE_ENV`, `RUNPOD_ENDPOINT_ID`, `RUNPOD_API_KEY`, **`RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`**.
 
-**Which of those are actually validated at boot:** `env.ts` hard-exits on 19 of them, including `R2_PUBLIC_URL_BASE` and `BETTER_AUTH_SECRET`. `NODE_ENV` falls back to `"development"` if unset.
+**Which of those are actually validated at boot:** `env.ts` hard-exits on **22** of them (19 before Aug 19, plus the three Razorpay keys), including `R2_PUBLIC_URL_BASE` and `BETTER_AUTH_SECRET`. `NODE_ENV` falls back to `"development"` if unset.
+
+**Razorpay config is nested, not flat:** `config.razorpay.razorpayKeyId` / `.razorpayKeySecret` / `.razorpayWebhookSecret`. The stutter is deliberate — it was the chosen shape and code was reverted to match it once.
 
 **Critical rules:**
 - NO QUOTES in `.env` values. `dotenv` strips them locally, Docker `--env-file` reads raw and breaks (`%22` in URLs).
@@ -489,7 +553,7 @@ unilake-backend/
 1. `docker build -t unilake-backend .`
 2. `docker run --rm -p 8080:8080 --env-file .env unilake-backend`
 
-**Cloud Run config:** `--min-instances 1`, `--max-instances 1`, `--timeout 3600`, `--memory 1Gi`, `--cpu 1`, `--port 8080`.
+**Cloud Run config:** `--min-instances 1`, `--max-instances 1`, `--timeout 3600`, `--memory 1Gi` (**bumping to `2Gi` before production PDF traffic, agreed Aug 21**), `--cpu 1`, `--port 8080`.
 
 **GCP setup:** Auto-deploy to Cloud Run is working. Exact configuration (Cloud Build trigger / continuous deploy / GitHub Actions) TBD — verify in GCP Console. Previous references to a `github-actions-deployer` service account and secrets `GCP_SA_KEY` / `GCP_PROJECT_ID` / `GCP_REGION` were inaccurate.
 
@@ -524,10 +588,29 @@ unilake-backend/
 - A comic's theme can be attached but not detached — `updateComic` only ever issues `{ connect: { id } }`.
 - `updateComic` does not re-check `freePreviewPages < pageCount`; that refine exists only on create. Create allows `freePreviewPages: 0`, update requires at least 1.
 - `Country.isActive` exists and is filtered on by the public endpoint, but is absent from the create schema, the update schema, and any toggle route — so every country stays active.
-- All six session-mutating functions carry an expiry guard (`assertNotExpired`). `PATCH /sessions/:id` is the one that still has no **status** guard — you can PATCH `childName` or `pronounKey` after generation has finished, including after payment, leaving the personalised text in the generated images out of sync with the DB. Audit 8.3, still open.
+- All six session-mutating functions carry an expiry guard (`assertNotExpired`). `PATCH /sessions/:id` (`updateOrderSession`) also carries a **post-payment field lock (Aug 21, Bug 6)**: at `AWAITING_PAYMENT` or any post-payment status, 12 fields are locked (`childName`, `age`, `pronounKey`, `coverType`, and all 8 shipping fields) and any attempt to PATCH them returns 409 naming the offending fields. Only `notificationEmail` remains editable post-payment — it is never printed. Closes audit 8.3.
 - Regeneration is allowed from `GENERATING_PREVIEW`, `PREVIEW_READY`, `GENERATING_PAID`, `PAID_PAGES_READY`, and `FAILED`. Payment-based cap resolves via `POST_PAYMENT_STATUSES`. `FAILED` is included so a totally-failed session can self-recover; an expired-then-`FAILED` session still cannot, because `assertNotExpired` runs first.
 - Photo upload-URL and photo-confirm share one `PHOTO_MUTABLE_STATUSES` constant (`CREATED`, `PHOTO_UPLOADED`) deliberately — the two halves drifted apart once, which made re-upload unreachable from the frontend.
 - **Publish is a synchronous DB status flip** — no async ComfyUI asset sync worker exists or is planned (single-LoRA architecture makes it unnecessary).
+
+**Payment & fulfilment rules (locked Aug 19):**
+- **Payment does not block the user.** After `payment.captured` all remaining paid pages generate in the background; the frontend shows a "your comic is being made" prompt with an optional link through to the live preview screen. Email (and later WhatsApp) fires when generation finishes.
+- **No refunds.** Once payment succeeds and paid-page generation starts, there is no way back. `REFUNDED` was deliberately dropped from `OrderStatus`.
+- **No expiry after payment** — the session is meant to live until send-to-print, with admin nudging an abandoned one manually. **The code does not implement this yet** (see the `FAILED` note in §5); it is a launch-blocker.
+- **Selection is a single batch commit.** The user browses variants with zero API calls — the backend never tracks "currently viewing." `isSelected` is written only at send-to-print, from `{ selections: [{ pageId, variantIndex }] }`, in one transaction covering every page. There is deliberately no per-page select endpoint. Every page must carry an explicit selection; enforced at both UI and endpoint level.
+- **Post-payment regeneration is allowed only while `Order.status ∈ {PAID, GENERATED}`** and is blocked from `CONFIRMED` onward. Preview-phase regeneration is untouched.
+- **The session is read-only after send-to-print.** A later regenerate returns "order already confirmed"; a second send-to-print returns "order already created."
+- **PDF compilation is an async background job (changed Aug 21).** Send-to-print enqueues to the `pdf-compilation` BullMQ queue and returns 200 immediately once the DB transaction commits and the job is enqueued. The `pdfWorker` calls `compilePdfForSession`, which downloads selected `finalImageUrl` variants from R2, converts PNG→JPEG@85% via sharp (composited over white for transparency safety), embeds via pdf-lib sized to source image dimensions, uploads to R2 public bucket at `pdfs/{sessionId}.pdf`, updates Order URLs, flips session `COMPILING_PDF → SHIPMENT_QUEUED`, and enqueues Shiprocket inline. BullMQ retries 3× with exponential backoff on transient failure; final failure flips session to `PDF_FAILED` for admin retry (the failure handler uses a `job.attemptsMade < job.opts.attempts` guard so early retries don't flip prematurely). The prior Aug 19 decision that "PDF compilation runs synchronously at send-to-print and must succeed" was reversed — synchronous held the request open for the full ~60s+ compilation and made retries a customer-facing button rather than backend automation.
+- **Shiprocket order creation is a background job with retries.** Currently a stub worker (feature #4 replaces it). Exhausting retries sets `Order.status = SHIPROCKET_FAILED` for an admin-filtered view, from which an admin can move it to `READY_TO_SHIP`. AWB and manifest stay manual admin actions — they need physical weight and dimensions.
+- **All outbound notification goes through one `notifyUser(orderId, event)` helper** — decision from Aug 19. The helper does not exist yet; it is a TODO comment in three call sites as of Aug 21 (generation worker success path, generation worker failure-with-earlier-success path, and inside `compilePdfForSession`'s completion). Will be feature #5. Email first; WhatsApp becomes a one-file addition once a provider is chosen. Neither can block the send-to-print response.
+- **Admin can see sessions in every status from `PAID` onward**, including the in-progress selection stage. No real-time notification — the DB row is enough.
+- **Only India is seeded active.** The payment code is currency-agnostic, so enabling a new country once Razorpay approves international is an admin DB row with no deploy.
+- **Country matching is not enforced server-side.** IP-based defaulting is a frontend concern; a US user can pick INR pricing and pay the Indian price with a US card. Accepted knowingly — the volume is low and it preserves the gift-shipping case.
+
+**Payment security:**
+- Razorpay webhook signature is HMAC-SHA256 over the raw body, compared with `crypto.timingSafeEqual` so the comparison leaks no timing information.
+- **Webhook-only — there is no client-side verify endpoint.** Accepted trade-off: the user may see a brief delay while the webhook lands. Adding a verify endpoint later is ~2 h of work and is the agreed remedy if it becomes a real UX problem post-launch.
+- `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` never leave the server. Only `razorpayKeyId` is returned to the client, which is correct — it is the publishable key.
 
 **Security:**
 - Two separate R2 buckets, structural. Page artwork/masks are deliberately PUBLIC — accepted trade-off, since preview pages are given away free anyway and blank-bubble artwork without face-swap or personalisation is not the sellable product. Fonts, child photos and LoRA remain private.
@@ -541,7 +624,7 @@ unilake-backend/
 
 **Session lifetime:** `OrderSession.expiresAt` is set to 24 h at creation. Enforced two ways:
 
-1. **Query-time (carries correctness):** `assertNotExpired(session)` at the top of all six session-mutating functions — `updateOrderSession`, `createPhotoUploadUrl`, `confirmSessionPhoto`, `triggerGeneration`, `regeneratePage`, `attachUserToSession`. Throws `ConflictError` (409) and atomically flips status to `FAILED` via `updateMany` with a terminal-status guard, so the write happens once and repeat calls short-circuit. Read paths (`getOrderSessionId`) deliberately do NOT call it — they return `isExpired: true` so the frontend can render an expired state before the user tries to mutate.
+1. **Query-time (carries correctness):** `assertNotExpired(session)` at the top of all six session-mutating functions — `updateOrderSession`, `createPhotoUploadUrl`, `confirmSessionPhoto`, `triggerGeneration`, `regeneratePage`, `attachUserToSession` — plus a **private duplicate of the same helper inside `checkout.service.ts`** (copied rather than extracted; deferred until a third caller needs a shared util). Both copies check `EXPIRY_EXEMPT_STATUSES` first and early-return for paid/awaiting-payment sessions (Aug 21). The constant is exported from `session.service.ts` alongside `POST_PAYMENT_STATUSES`; `checkout.service.ts` imports it rather than duplicating.
 2. **Hourly sweeper (hygiene only):** `sweepExpiredSessions` registered via `setInterval` in `initJobs`, cleared on graceful shutdown. `updateMany` with a status guard makes overlapping runs no-ops. **Best-effort by design** — see the Cloud Run caveat below.
 
 WebSocket handshake still returns 410 Gone. R2 asset cleanup for expired sessions is not implemented (needs reference checks).

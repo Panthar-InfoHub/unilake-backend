@@ -66,13 +66,13 @@
 - **Webhook-based RunPod result delivery** — polling was chosen. Adding a webhook route later would create two systems doing the same job.
 - **`/runsync` for RunPod jobs** — connection timeouts + BullMQ retry semantics turn a held-open HTTP call into an unpredictable failure mode. Especially bad given 60–180s job durations approaching proxy timeouts.
 - **Modifying node 473 (negative prompt) per request** — it's a generic quality guardrail; per-page overrides not planned. The positive prompt (node 111) IS patched per request from `Page.pagePrompt`.
-- **Font `randomUUID()` in upload keys** — tried and reverted this session. Font upload contract stays sequential (`Date.now()` only); real-world usage is 1–3 fonts per comic, sequential upload is fine, and one less rule reduces cognitive load for the frontend team. Locked as a decision, not a temporary workaround.
+- **Font `randomUUID()` in upload keys** — tried and reverted in the August 3 session. Font upload contract stays sequential (`Date.now()` only); real-world usage is 1–3 fonts per comic, sequential upload is fine, and one less rule reduces cognitive load for the frontend team. Locked as a decision, not a temporary workaround.
 - **Mutating the imported `apiWorkflow` JSON object** — it's a shared module-cached reference in Node ESM; mutation would leak state across concurrent jobs. Always `JSON.parse(JSON.stringify(...))` or `structuredClone` before patching.
 - **Preview page selection based on `pageNumber <= freePreviewPages`** — `Page.isPreviewPage` boolean is the ONLY source of truth for which pages are free. Admin picks WHICH pages (not necessarily the first N). `Comic.freePreviewPages` is metadata + sanity-check warning only. Query filter must always be `where: { comicId, isPreviewPage: true }`.
-- **BullMQ enqueue inside a Prisma `$transaction`** — Redis is a separate system that doesn't roll back with Prisma. Enqueue AFTER DB commit succeeds. Worst case is orphaned QUEUED rows if Redis is down — and `enqueuePreviewGenerationJobs` is now re-entrant, so a retry reuses them (see FINALIZED APPROACHES).
+- **BullMQ enqueue inside a Prisma `$transaction`** — Redis is a separate system that doesn't roll back with Prisma. Enqueue AFTER DB commit succeeds. Worst case is orphaned QUEUED rows if Redis is down — and `enqueuePreviewGenerationJobs` is now re-entrant, so a retry reuses them (see FINALIZED APPROACHES). Reinforced Aug 21 in send-to-print and PDF worker.
 - **Blind `pageVersion.create()` on a re-generate** — `enqueuePreviewGenerationJobs` must load existing `variantIndex: 0` rows first and create only what's missing, or a retry after a Redis outage dies on the `(orderSessionId, pageId, variantIndex)` unique constraint with no way to recover the session.
 - **Pairing PageVersion rows to pages by array index** — reused rows and freshly-created rows come from two different queries, so positional pairing silently attaches the wrong BullMQ priority to the wrong page. Always look the page up by `pageId`.
-- **Job payload carrying anything beyond `pageVersionId`** — worker looks up all related data from DB. Keeps the enqueue+dequeue contract minimal and the worker's row idempotency clean.
+- **Job payload carrying anything beyond `pageVersionId`** — worker looks up all related data from DB. Keeps the enqueue+dequeue contract minimal and the worker's row idempotency clean. (Send-to-print / PDF / Shiprocket jobs carry `{ orderSessionId }` for the same reason.)
 - **Session status flip to `GENERATING_PREVIEW` before enqueue succeeds — *in `triggerGeneration`*** — flip AFTER. Otherwise a failed enqueue leaves the session stuck in `GENERATING_PREVIEW`, which `GENERATABLE_STATUSES` does not accept, so the user can never re-run `triggerGeneration` and never reach the orphan-row recovery inside `enqueuePreviewGenerationJobs`. **Scope note:** this rule is specific to the first-generation path. `regeneratePage` deliberately flips `FAILED → GENERATING_PREVIEW` *before* its enqueue — see the recovery-path entry under SD worker orchestration for why the opposite order is correct there.
 - **Priority values above BullMQ's 21-bit limit** — max is 2,097,151 (2^21 − 1). Any formula using `Date.now()` values directly is 800,000x too big and throws `Priority should be between 0 and 2097152`. Compress to fit.
 - **PNG for RunPod API payload** — a stamped 2000×1455 PNG is ~8 MB; base64 pushes past RunPod's 10 MiB API cap. Transcode to JPEG q88 for the round-trip; R2 STORAGE stays PNG at print quality.
@@ -90,6 +90,26 @@
 - **Partial page lists in the reorder payload** — `orderedPageIds` must contain every page of the comic. A subset renumbers into 1..n and collides with the pages left alone.
 - **Writing final page numbers directly during a reorder** — `@@unique([comicId, pageNumber])` is enforced per statement and is not deferrable, so any swap fails immediately. Park every page on a negative number first, then assign real ones, both inside one `$transaction`.
 - **Reordering or deleting pages of a live comic** — reorder is blocked on `PUBLISHED` status and on any active order session, because PDF compilation orders by `pageNumber` and unpublishing does not cancel in-flight sessions.
+- **Mounting the webhook router after `express.json()`** — Razorpay signs the exact bytes on the wire. `express.json()` parses and re-serializes them, so every signature check fails. `/api/webhooks` mounts with `express.raw({ type: "application/json" })` above `express.json()`, the same shape Better Auth already needed.
+- **Hardcoding `× 100` for payment amounts** — use `toSmallestUnit(amount, currency)`. `JPY`/`KRW`/`VND`/`CLP`/`ISK`/`TWD` have no minor unit and `BHD`/`KWD`/`OMR`/`JOD` have three decimals; a hardcoded multiplier silently overcharges or undercharges by 100× the day a second currency is enabled.
+- **A standalone per-page variant-select endpoint** (`PATCH /sessions/:id/pages/:pageId/select`) — considered, then eliminated. Selection is one transactional batch at send-to-print carrying `{ selections: [{ pageId, variantIndex }] }`. Browsing variants must cost zero API calls; the backend never tracks "currently viewing."
+- **Writing `isSelected` at generation time** — every variant is born `false`. The field is written only by an explicit user action, and the only such action is the send-to-print commit.
+- **Sending the shipping address in the checkout request body** — the frontend PATCHes the eight shipping fields onto the `OrderSession` when the user picks an address; `initiateCheckout` reads them from session state. Checkout takes no body at all.
+- **Linking `Order.shipping*` back to `SavedAddress`** — `SavedAddress` is an address book, nothing more. Editing or deleting a saved address must never mutate a placed order; the snapshot is the record.
+- **Storing the customer-facing order status** — it is derived from `OrderStatus` by `toPublicStatus()` on every read. Storing it means a migration every time marketing renames a stage.
+- **A client-side payment-verify endpoint** — the webhook is the sole trigger. Two systems confirming the same payment is exactly the duplication rejected for RunPod webhooks-vs-polling. Accepted cost: a brief delay while the webhook lands. Revisit only if that becomes a measured UX problem post-launch (~2 h of work).
+- **Treating `order.paid` as a trigger event** — redundant with `payment.captured` for a single-payment-per-order shape. `payment.captured` is the only event that changes state; `payment.failed` logs for support; everything else is logged and ignored.
+- **Returning a non-400 status on a bad webhook signature** — 400 tells Razorpay the failure is permanent and stops the retry storm. Transient failures must re-throw instead, so Razorpay *does* retry.
+- **Comparing webhook signatures with `===`** — use `crypto.timingSafeEqual` on equal-length buffers. String comparison short-circuits on first mismatch and leaks the signature a byte at a time.
+- **Enforcing that the shipping country matches the user's real location** — deliberately not done. IP-based defaulting is the frontend's job. A US user can pick INR pricing and pay with a US card; accepted, because the volume is low and blocking it would break gift shipping.
+- **Refunds** — none. Once payment succeeds and paid-page generation starts there is no way back, which is why `REFUNDED` was dropped from `OrderStatus`.
+- **(Aug 21) Letting a Razorpay webhook enqueue failure return 200.** Always re-throw so Razorpay retries. Swallowing = stranded PAID session forever. Before re-throwing, delete the `WebhookEvent` row so P2002 dedupe doesn't block the retry.
+- **(Aug 21) Auto-refund on paid-page generation failure.** Order stays at PAID on all-page-failure; admin decides refund/cancel. Consistent with the general no-automatic-refunds rule.
+- **(Aug 21) Auto-select variants server-side at send-to-print.** Customer picks every variant explicitly across all pages (preview + paid). Preview pages get re-reviewed post-payment because the customer can regenerate them right up until send-to-print.
+- **(Aug 21) Assume Prisma `updateMany` count > 0 means "everything is fine" in a multi-flip transaction.** Check `count === 0` on each guard and throw to trigger rollback. Applies to send-to-print (Session + Order both need to flip), PDF compilation (same), and future compound transitions.
+- **(Aug 21) `job.attempts >= max` as a BullMQ "final failure" check.** Use `job.attemptsMade < job.opts.attempts` inside the `failed` handler. BullMQ fires `failed` on every retry, not just the last one; without the guard, PDF_FAILED / SHIPMENT_FAILED gets set prematurely on the first transient failure.
+- **(Aug 21) Silent no-op on a PATCH that touches locked fields.** `updateOrderSession` throws `ConflictError` naming every attempted-but-locked field. Silent acceptance would let the customer think their edit landed and desync the DB from images/Order.
+- **(Aug 21) Comic cover as `coverImageUrl`.** Field is `coverThumbnailUrls: String[]`. Order endpoints return the array; frontend picks the display index. Only permanent field name for comic covers.
 
 ---
 
@@ -107,7 +127,8 @@
 - **SD worker helpers split into `src/jobs/workers/sd/`** — one file per concern: `tokens.ts`, `textStamp.ts`, `workflow.ts`, `runpodClient.ts`, `photoCache.ts`. Keeps `generationWorker.ts` as thin orchestrator.
 - **ComfyUI workflow template at `src/config/workflows/api-workflow.json`** — imported directly with `with { type: "json" }`, deep-cloned per job via `JSON.parse(JSON.stringify(x))`. Never mutated in place.
 - **`BigInt.prototype.toJSON` patched in `app.ts`** — `PageVersion.seed` is BigInt; `JSON.stringify` can't handle BigInts natively. Patch returns string. Frontend must type `seed` as `string | null` if consumed.
-- **Better Auth handler mounts ABOVE `express.json()`** — it needs the raw body. Reordering these two lines breaks authentication with no obvious symptom. `helmet()` sits after it, so `/api/auth/*` responses carry no helmet headers.
+- **Better Auth handler mounts ABOVE `express.json()`** — it needs the raw body. Reordering these two lines breaks authentication with no obvious symptom. **⚠️ CONTRADICTORY (Aug 19):** the second half of this rule said `helmet()` sits after the auth handler so `/api/auth/*` responses carry no helmet headers. As of the checkout session `helmet()` runs *before* the auth handler, so they now do. The reorder was never recorded and may have been accidental — confirm intent, then either revert the code or rewrite this rule.
+- **`/api/webhooks` mounts with `express.raw({ type: "application/json" })`, also above `express.json()`** — for the same reason Better Auth is there. Razorpay's HMAC is computed over the exact wire bytes; parsing and re-serializing breaks it. Every other route still receives parsed JSON.
 - **`app.set("trust proxy", 1)`** — required on Cloud Run for correct client IPs and for the `secure` cookie flag to resolve behind the load balancer.
 - **`GET /health` returns a plain string, not the `sendSuccess` envelope** — the single deliberate exception to the envelope rule.
 - **Query strings validated inline, not by middleware** — `comic.controller` (public + admin list) and `feedback.controller` call `schema.parse(req.query)` inside try/catch converting `ZodError` → `ValidationError`. This is the accepted stand-in until `validateQuery` exists; it satisfies the never-uncaught-`.parse()` rule.
@@ -116,7 +137,7 @@
 - **No typecheck runs anywhere** — `tsconfig.json` sets `"types": []` and tsx strips types without checking. "No `tsc` build step" was the decision; it also left no `tsc` *check* step, so type errors surface only at runtime.
 - **Workers run in the web server's process** — `initJobs()` is called from `server.ts`; there is no separate worker process or event loop. Anything that assumes process isolation (timers, in-memory caches, shutdown handling) must account for that.
 - **BullMQ job retention** — completed jobs kept 24 h or the last 1000 (whichever is stricter); failed jobs kept 7 days. That window is how long a failure stays debuggable in Redis.
-- **`pdf-compilation` has a live worker but no producer** — `pdfWorker` listens; nothing enqueues to it yet.
+- **Service functions do the heavy lifting; workers are thin wrappers** (added Aug 21) — established pattern: `compilePdfForSession` in `session.service.ts`, `pdfWorker` just calls it. Mirrors `maybeMarkPaidReady`/`maybeMarkPreviewComplete` shape. Keeps all business logic testable outside the queue layer and lets multiple triggers reuse the same function.
 
 **Data & sessions** (unchanged from prior sessions)
 
@@ -153,7 +174,7 @@
 - **Regenerate uses transactional variant-index computation** — count + cap check + row create all inside `$transaction`. Prevents double-click race producing duplicate `variantIndex` values.
 - **Session status transition timing (first generation):** `PHOTO_UPLOADED → GENERATING_PREVIEW` fires AFTER `enqueuePreviewGenerationJobs` returns successfully, not before. Recoverable on enqueue failure. The recovery path in `regeneratePage` uses the opposite order on purpose — see below.
 - **BullMQ priority formula:** `sessionSecondsInDay + (pageNumber * 80_000)`. Max value = 2,006,399 — fits BullMQ's 21-bit ceiling of 2,097,151. Session component wraps at 24h (matches session TTL); page-number term dominates so users interleave. Implemented as `computeJobPriority(sessionCreatedAt, pageNumber)` helper in `session.service.ts` used by both enqueue and regenerate.
-- **BullMQ concurrency = 5 to match RunPod max workers.** Wasted RunPod capacity if lower; wasted BullMQ slots waiting for RunPod if higher.
+- **BullMQ concurrency = 5 to match RunPod max workers.** Wasted RunPod capacity if lower; wasted BullMQ slots waiting for RunPod if higher. PDF worker and Shiprocket worker also run at concurrency 5 for consistency.
 - **Idempotency guard at top of worker** — if row is already `SD_READY` with `finalImageUrl`, re-emit `page:ready` and return successfully. Handles BullMQ retry-after-ack-lost edge case cheaply.
 - **`SD_READY` write clears `errorMessage: null`** — retries that succeed after a prior failure must not leave stale error text on the successful row.
 - **Non-face pages skip `GENERATING_SD` status** — go `TEXT_STAMPED → SD_READY` directly. Consistent visibility of pipeline progress in DB.
@@ -161,6 +182,8 @@
 - **Failure path in worker:** wraps pipeline in try/catch/finally. Catch marks row `FAILED` with `errorMessage`, emits `page:error`, re-throws so BullMQ retries per `attempts:3` policy. Finally releases photo cache if it was acquired. `photoAcquired` boolean flag ensures release only fires if acquire succeeded.
 - **`markPageVersionFailed` never throws** — nested throw inside a catch handler would mask the original error. DB failure inside cleanup is logged, not re-raised.
 - **Preview completion uses `updateMany` + status guard** — `maybeMarkPreviewComplete` runs after every terminal PageVersion transition (SD_READY or FAILED). Counts total preview pages, reduces every terminal row into per-page "settled" and "succeeded" sets, decides success-vs-failure, flips via `updateMany` with status in the `WHERE` clause. Real Postgres single-statement atomicity — no `$transaction`, no fake row-lock reasoning.
+- **Paid-page completion mirrors preview completion** (added Aug 21) — `maybeMarkPaidReady` in `session.service.ts` has the same shape as `maybeMarkPreviewComplete` scoped to `isPreviewPage: false`. Flips session `GENERATING_PAID → PAID_PAGES_READY` AND Order `PAID → GENERATED` in one `$transaction`. Success-wins semantics: any `SD_READY` variant → `PAID_PAGES_READY`; only flips to `FAILED` when every paid page has final-failed. On all-page-failure, Order stays at `PAID` — refund/cancel is an explicit ops decision, never automatic. Wired into both success and failure paths of `generationWorker.ts` alongside the existing preview call; whichever helper's filter doesn't match the finished page returns `not-done` and no-ops.
+- **`emitSessionPaidReady` WebSocket event** (added Aug 21) — mirrors `emitSessionPreviewReady`. Emitted from both the success path and the failure-with-earlier-success edge case in `generationWorker.ts`. Type string: `session:paid-ready`, no payload. All-failure path stays silent (mirrors preview).
 - **No `distinct: ["pageId"]` in the terminal-state query** — a regenerated page holds several variants (variant 0 `FAILED`, variant 1 `SD_READY`), and `distinct` collapses to one arbitrary row per page because there is no `orderBy` that answers both "did it settle" and "did any variant succeed" at once. The `distinct` version could read `FAILED` for a page that succeeded on retry and flip the whole session to `FAILED`. Load all terminal rows and reduce into two `Set`s instead — bounded by preview pages × variant cap, so the cost is nil.
 - **Success-wins semantics** — session flips to `PREVIEW_READY` if any single page reaches `SD_READY`. Only flips to `FAILED` when every preview page has final-failed. Failed pages surface via per-page `page:error` events; users retry them via existing `/regenerate` endpoint.
 - **`FAILED` is retryable** — added to `REGENERATABLE_STATUSES` so a totally-failed session can self-recover via per-page regenerate. `assertNotExpired` runs first in `regeneratePage`, so an expired-then-failed session can't be re-opened via regenerate.
@@ -173,7 +196,7 @@
 - **Display derivative built per SD_READY row** — `buildAndUploadDisplayImage(sessionId, pageVersionId, sourceBuffer)` uploads to `sessions/{sessionId}/final/{pageVersionId}.webp` and returns the public URL, or null on failure. Runs for both branches: face pages from the RunPod result buffer, non-face pages from the stamped buffer. Written in the same `SD_READY` update as `finalImageUrl`.
 - **Display derivative settings** — long edge capped at 1600px (`fit: "inside"`, never crops), WebP quality 80, `withoutEnlargement: true`. 1600 covers a 2× retina display for the viewer's 800 CSS px box with nothing wasted. Constants live in `src/lib/image.ts`.
 - **Worker error-message truncation** — `markPageVersionFailed` cuts messages to `MAX_ERROR_MESSAGE_LENGTH = 500` before writing. That truncated text is what reaches the user through `page:error` and the GET response.
-- **Re-entrant enqueue** — `enqueuePreviewGenerationJobs` reuses existing `variantIndex: 0` rows, creates only missing ones, resets reused rows that are neither `SD_READY` nor `QUEUED` back to `QUEUED` with `errorMessage: null`, and skips enqueuing anything already `SD_READY`. Retry after a Redis outage now recovers cleanly.
+- **Re-entrant enqueue** — `enqueuePreviewGenerationJobs` reuses existing `variantIndex: 0` rows, creates only missing ones, resets reused rows that are neither `SD_READY` nor `QUEUED` back to `QUEUED` with `errorMessage: null`, and skips enqueuing anything already `SD_READY`. Retry after a Redis outage now recovers cleanly. `enqueuePaidGenerationJobs` mirrors this exactly with the `isPreviewPage: false` filter.
 
 **Photo cache (`src/jobs/workers/sd/photoCache.ts`)**
 - **In-memory `Map<sessionId, CacheEntry>` with reference counting** — first `acquirePhoto` triggers R2 download and stores Promise; concurrent callers await the same in-flight fetch. `releasePhoto` decrements refCount; entry evicts when refCount hits zero.
@@ -183,11 +206,12 @@
 - **Cache is process-memory only** — no persistence across restarts. Reference-counted for the duration of a job burst, not for the user's session lifetime. Different concept from the user's OrderSession.
 
 **WebSocket events (`src/websocket/event.ts`)**
-- **Three emit helpers:** `emitPageReady`, `emitPageError`, `emitSessionPreviewReady`. All three: get room → bail silently with debug log if no sockets → iterate sockets → send only if `readyState === OPEN`.
+- **Four emit helpers:** `emitPageReady`, `emitPageError`, `emitSessionPreviewReady`, `emitSessionPaidReady`. All four: get room → bail silently with debug log if no sockets → iterate sockets → send only if `readyState === OPEN`.
 - **Event shapes (locked, frontend building against these):**
   - `page:ready` → `{ type, pageNumber, variantIndex, imageUrl, displayImageUrl, pageVersionId }`
   - `page:error` → `{ type, pageNumber, variantIndex, errorMessage }`
   - `session:preview-ready` → `{ type }` (no payload)
+  - `session:paid-ready` → `{ type }` (no payload)
 - **`imageUrl` stays the print master; `displayImageUrl` is the web-sized WebP** — keeping `imageUrl` unchanged made the added field backward compatible. `displayImageUrl` is `string | null`; clients fall back to `imageUrl` when null. The worker's idempotency re-emit path sends both fields too.
 - **Emit is fire-and-forget** — never awaited. WebSocket send is synchronous; awaiting adds latency for no gain.
 - **Empty rooms are silent no-ops** — DB has the source-of-truth state; user reconnects via `GET /sessions/:id` if they missed events.
@@ -195,7 +219,8 @@
 **Session API contracts**
 - **`POST /sessions/:id/photo/confirm`** (renamed from `.../photo/validate`) — accepts `{ key }`. Sets `bestPhotoUrl` + `rawPhotoUrls`, flips status to `PHOTO_UPLOADED`. Accepts both `CREATED` and `PHOTO_UPLOADED` current status (allows photo re-upload before generation).
 - **`GET /sessions/:id` response shape** — nested `pages[].variants[]` structure, includes ALL pages of the comic (not just preview ones) so frontend can render locked pages with paywall overlay. Each page exposes `pageId`, `pageNumber`, `isPreviewPage`, `hasFace`, `variants[]`. Each variant exposes `pageVersionId`, `variantIndex`, `status`, `finalImageUrl`, **`displayImageUrl`**, `isSelected`, `errorMessage`. Internal fields (`seed`, `textStampedUrl`, `comfyJobId`, `steps`, `cfg`, `pagePrompt`) deliberately excluded. Response includes `comic: { id, title, freePreviewPages, coverThumbnailUrls }` for one-shot rendering.
-- **`PATCH /sessions/:id`** — accepts `childName`, `age`, `pronounKey`, `notificationEmail`, `coverType`, and all seven shipping fields. It carries the same expiry gate as every other session mutation (`assertNotExpired`), but is still the one mutation with **no status gate** — audit 8.3, open. Editing `childName` or `pronounKey` after generation finishes desyncs the text already burned into the images, including post-payment.
+- **`PATCH /sessions/:id`** — accepts `childName`, `age`, `pronounKey`, `notificationEmail`, `coverType`, and all seven shipping fields. Also carries the expiry gate (`assertNotExpired`). **(Aug 21 update)** Now carries a status gate too: locks 12 fields (`childName`, `age`, `pronounKey`, `coverType`, and all 8 shipping fields) once session is at `AWAITING_PAYMENT` or any post-payment status. Only `notificationEmail` stays editable, because it's never printed. Silent PATCH acceptance would have desynced the DB from images baked into paid PageVersions and from shipping snapshotted onto `Order`. Closes audit 8.3.
+- **`POST /api/user/sessions/:sessionId/send-to-print`** (added Aug 21) — customer commits variant selections across all pages, session locks. Body: `{ selections: [{ pageNumber, variantIndex }, ...] }`, one entry per page. Full flow: guards → in-flight check (rejects if any PageVersion for the session is non-terminal, not just the selected ones) → per-selection validation → atomic transaction (mark `isSelected: true` on chosen variants + flip Session `PAID_PAGES_READY → CONFIRMED` + flip Order `GENERATED → CONFIRMED`) → enqueue PDF compilation with `jobId: sessionId` for BullMQ dedupe. Idempotent: second call at `CONFIRMED` re-enqueues the PDF job and returns success; no status change on the retry path.
 - **`GET /countries` (public)** — active countries only, explicit `select` so `isActive` never appears in the payload. Deliberately separate from the admin list, which must also return deactivated rows and needs a different field set.
 - **Snapshot + stream contract for frontend** — GET is the complete state (initial load, reconnect after disconnect, return after being away). WebSocket is the delta stream during active generation. Both together = full state sync.
 
@@ -204,7 +229,7 @@
 - **api-workflow.json IS the backend template.** Deep-clone per request, patch per-job fields, send in `input.workflow`. Committed to backend git under `src/config/workflows/`.
 - **Fields patched per request (SEVEN):** node 78 (comic page artwork filename), node 435 (child image filename), node 519 (mask filename), node 466 (`noise_seed`), node 471 (`steps` from `Page.steps`), node 467 (`cfg` from `Page.cfg`), node 111 (positive prompt from `Page.pagePrompt`). Node 473 (negative prompt) stays hardcoded.
 - **Filename-match rule:** `input.images[].name` must exactly equal the workflow's LoadImage `inputs.image` string.
-- **Seed handling:** the worker generates a plain JS number (`Math.floor(Math.random() * 1_000_000_000)`), patches that straight into node 466, and only converts to `BigInt(seed)` when writing `PageVersion.seed`. There is no BigInt→Number conversion anywhere. Seeds stay in the safe 53-bit range by construction. (This entry previously described the reverse flow; the doc was wrong, the code was right — see SUPERSEDED.)
+- **Seed handling:** the worker generates a plain JS number (`Math.floor(Math.random() * 1_000_000_000)`), patches that straight into node 466, and only converts to `BigInt(seed)` when writing `PageVersion.seed`. There is no BigInt→Number conversion anywhere. Seeds stay in the safe 53-bit range by construction.
 - **Result decoding:** only `output.images[0]` is read. The current workflow has one `SaveImage` node; additional outputs would be silently dropped.
 - **Poll loop shape:** status is checked first, then the loop sleeps — so the first check is immediate rather than 5 s late.
 - **Polling over webhook for RunPod result retrieval** — worker submits to `/run`, gets jobId, then polls `GET /status/{jobId}` every 5s until COMPLETED / FAILED / CANCELLED.
@@ -227,7 +252,7 @@
 - **Page artwork + masks are PUBLIC**; fonts, child photos and LoRA stay PRIVATE.
 - **Frontend always sends a `key`, backend stores the resolved URL.**
 - **`thumbnailKeys` accepts either a full public URL or a raw key.**
-- **`normalizeThumbnailInput` is local to `comic.service.ts`.** `r2.getKeyFromPublicUrl` stays reserved for the SD worker.
+- **`normalizeThumbnailInput` is local to `comic.service.ts`.** `r2.getKeyFromPublicUrl` stays reserved for the SD worker (and now the PDF worker, which needs it for the same reason: turning a stored `finalImageUrl` public URL back into a key so `downloadFileToBuffer` can fetch it).
 - **Page upload keys carry `randomUUID()`**; **font upload keys stay `Date.now()`-only**.
 - **Best-effort R2 cleanup on page update/delete and comic delete.** `deleteComic` also sweeps every page's artwork and mask, since pages cascade-delete in the DB but their R2 objects do not. `Font` and `Country` perform no R2 cleanup on replace or delete.
 - **Delete ordering — DB row first, always:** every deleter across the codebase (`CustomerReview`, `TeamMember`, `HeroImage`, `comic.service`, `page.service`) now follows the same shape: (1) load DB row, (2) run guards, (3) extract R2 keys into local vars, (4) delete DB row, (5) best-effort R2 cleanup in try/catch. A failed DB delete leaves R2 assets intact and the operation retryable. A failed R2 cleanup after DB success just orphans files (wasted storage), never breaks references.
@@ -252,6 +277,7 @@
 - **CORS origin lives in two places** — `app.ts` middleware and Better Auth `trustedOrigins`. Update both or login silently breaks.
 
 **Infra** (unchanged from prior sessions)
+- **(Aug 21) Cloud Run instance tier bumped to 2 GB RAM** — required for PDF worker concurrency 5 × ~120 MB peak per job to fit comfortably alongside Node runtime and other workers. Small monthly cost (~$5–15). Config change agreed but not yet applied; must land before production traffic hits `compilePdfForSession`. See CURRENT_STATE loose ends.
 
 **CMS** (unchanged from prior sessions)
 
@@ -264,7 +290,7 @@
 **Response envelope** (unchanged from prior sessions)
 
 
-### RunPod status polling (added this session)
+### RunPod status polling (added August 15, 2026)
 
 - **Retry policy:** `fetchStatus` retries transient failures up to 2 times with 500ms then 1000ms backoff. Total worst-case extra delay per poll: 1.5s (well under the 5s poll interval, so normal flow is unaffected).
 - **Transient (retry):** network failures (fetch `TypeError`), HTTP 5xx, HTTP 429 rate limits.
@@ -272,7 +298,7 @@
 - **Split into two functions:** `fetchStatusOnce` (raw HTTP call, no retry logic) + `fetchStatus` (retry wrapper). Separation of concerns keeps each function reasonable to reason about.
 - **Fixes audit 9.8** — a single network blip on any of ~200 status polls per job used to bubble to BullMQ and trigger a full-job retry, double-charging GPU.
 
-### Session expiry enforcement (added this session)
+### Session expiry enforcement (added August 15, 2026)
 
 - **Two-layer defense:** query-time via `assertNotExpired(session)` at the top of every session-mutating function, plus hourly background sweeper.
 - **On expiry detection during a mutation:** throw `ConflictError` AND atomically flip status to `FAILED` via `updateMany` + status guard. Future reads see clean terminal state. User can no longer bypass expiry via a subsequent call (idempotent).
@@ -281,90 +307,44 @@
 - **R2 asset cleanup deliberately deferred** — expired sessions may still have assets the user has cached. Physical cleanup needs reference-checking beyond this fix's scope.
 - **Read functions (`getOrderSessionId`) do NOT call `assertNotExpired`** — they still return `isExpired: true` in the response so the frontend can render appropriate UI before the user attempts to mutate.
 - **Expiry writes `FAILED`, which overloads that status** — `FAILED` now means generation-failed, expired-on-mutation, *or* expired-by-sweep. The frontend must read `isExpired` to tell them apart, because `FAILED` is regeneratable and only the generation-failed case actually retries successfully. Two knock-on effects: expired sessions stop blocking comic deletion and page reorder (both guards exclude `FAILED`), and their `PageVersion` rows then cascade-delete with the comic. A distinct `EXPIRED` enum value would resolve this for one migration plus four call-site updates — backlogged, not done. Full detail in `PROJECT_CONTEXT.md` §5.
+- **(Aug 21 amendment) Paid sessions are exempt from expiry entirely.** `EXPIRY_EXEMPT_STATUSES` = `AWAITING_PAYMENT` + `POST_PAYMENT_STATUSES` (`PAID`, `GENERATING_PAID`, `PAID_PAGES_READY`, `CONFIRMED`, `COMPILING_PDF`, `SHIPMENT_QUEUED`, `COMPLETED`). Checked in three places: both `assertNotExpired` copies (`session.service.ts` and `checkout.service.ts`), `sweepExpiredSessions`, and the `isExpired` computation returned by `getOrderSessionId`. Post-payment sessions live until send-to-print completes, period. **Accepted tradeoff:** abandoned `AWAITING_PAYMENT` sessions live forever with no cleanup — the alternative (killing a session mid-payment when the user takes >24h from session start) was strictly worse. Cleanup for abandoned checkouts is a separate future concern; can be layered as a dedicated sweep with different rules (Razorpay's own 15-min order expiry as the signal).
 
-### Environment variable validation (added this session)
+### Environment variable validation
 
 - **`R2_PUBLIC_URL_BASE` and `BETTER_AUTH_SECRET` are required at boot** — added to `env.ts` required list. App refuses to start if either is missing. Fixes audit 2.9 + 2.10: previously, missing `R2_PUBLIC_URL_BASE` silently wrote `undefined/<key>` as permanent URLs.
+- **`RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` are required at boot** (added August 19). The required list is now 22 entries.
+- **Razorpay config is nested, not flat** — `config.razorpay.razorpayKeyId`, `.razorpayKeySecret`, `.razorpayWebhookSecret`. The stutter is intentional; code that assumed flat naming was reverted to match.
 - **`NODE_ENV` remains optional** — falls back to `"development"`. Deliberate.
 
 ---
 
-## MISTAKES CAUGHT & CORRECTED
+### Checkout & payments (added August 19, 2026; expanded August 21, 2026)
 
-- Bare `new PrismaClient()` in `auth.ts` — fixed.
-- Double validation anti-pattern — cleaned up (partially — see loose ends).
-- Pino reversed arg order — fixed.
-- `.env` quotes break Docker `--env-file` — noted.
-- `prisma.config.ts` importing `env.ts` broke Docker build — decoupled.
-- `EXPOSE 3000` was wrong — changed to 8080.
-- Source must be COPIED before `prisma generate` in Dockerfile.
-- `ZodIssue` deprecated in Zod v4 — inline `{ message }` instead.
-- Dockerfile with Python was ~2 GB — rewritten to ~250 MB.
-- Old MediaPipe API failed — switched to Tasks API.
-- Python 3.14 failed — switched to 3.11.9.
-- CORS `methods` missing `PATCH` — fixed July 21.
-- `POST /api/admin/comics/:comicId/pages` route never registered — fixed July 21.
-- Pricing endpoints missing `coverType` after migration — fixed July 21.
-- Public comic endpoints missing `coverType` in pricing select — fixed July 21.
-- **Node 78's `clipspace/clipspace-painted-masked-*.png` value in api-workflow.json** — test-time artifact; patched at runtime.
-- **WebSocket `connection` handler never received `sessionId`** — fixed.
-- **`generateSessionHandler`/`regeneratePageHandler` used raw `.parse()`** — fixed with safeParse.
-- **`errorHandler.ts` compared `config.nodeEnv === "devlopment"` (typo)** — fixed.
-- **`admin.ts` registered `GET /team-members` twice** — split into `/team-members` and `/team-members/active`.
-- **`country.controller.ts` sent `messages` (typo key)** — dropped during response-envelope sweep.
-- **`getOrderSessionId` variant ordering** — fixed to order by `page.pageNumber` then `variantIndex`.
-- **`enqueuePreviewGenerationJobs` `.map()` returning undefined** — fixed to implicit-return the promise.
-- **Job name typo** — `"generate--page"` → `"generate-page"`.
-- **`textRenderedUrl`/`sdImageUrl`/`hdImageUrl` naming confusion** — renamed to `textStampedUrl`, `finalImageUrl`.
-- **RunPod build timed out at 30 min on first attempt** — commented out unused 2509 LoRA + placeholder image downloads.
-- **KJNodes `Cannot import ... No module named 'cv2'`** — added `pip install -r requirements.txt`.
-- **ReActor `Cannot import ... No module named 'onnxruntime'`** — added explicit `pip install onnxruntime-gpu`.
-- **ReActor `ImportError: libcudart.so.13`** — pinned `"onnxruntime-gpu<1.27"`.
-- **`fontSize` was left as `Int @default(24)` while bubble coords were being normalized** — caught during schema review, changed to `Float @default(0.02)`.
-- **Claude wrote `import sharp from "sharp"` then referenced `sharp.OverlayOptions` in Part C** — fixed to named type import.
-- **Claude wrote a `.ts` extension in Part C imports** — should be `.js` per ESM convention.
-- **Claude was going to write Part D with 6 patched fields, not 7** — Guts corrected: `pagePrompt` is now required and patched into node 111.
-- **Claude misread the first Part C output image and initially flagged pronoun substitution as broken** — corrected mid-message on second look.
-- **Claude gave BullMQ priority formula with raw `Date.now()`** — exceeded 21-bit limit (2,097,151). Fixed to `sessionSecondsInDay + (pageNumber * 80_000)`. Should have known the limit before proposing the formula.
-- **Claude wrote `session.createdAt` inside `enqueuePreviewGenerationJobs` where the parameter is named `sessionCreatedAt`** — TypeScript caught it. Local naming slip.
-- **Claude initially wrote worker guards checking `pagePrompt` and `maskUrl` for every page** — non-face pages don't need them. Split into "always required" vs "only if `hasFace`" branches.
-- **Claude initially forgot `errorMessage: null` in the SD_READY write** — stale error text lingered on rows that failed once and retried successfully. Added to SD_READY update.
-- **Session status flipped to `GENERATING_PREVIEW` BEFORE enqueue** — enqueue failure left sessions stuck. Moved status flip after enqueue succeeds.
-- **PageVersion query used `pageNumber <= freePreviewPages`** — should have been `isPreviewPage: true`. Admin picks WHICH pages, not the first N.
-- **BullMQ retry after DB commit + Redis fail hits unique constraint on retry** — orphaned QUEUED rows from prior attempt block re-insertion. Flagged as loose end; needs recovery path (delete-and-recreate or reuse existing).
-- **8 MB PNG payload to RunPod exceeded 10 MiB cap** — Sharp's default PNG re-encoding inflated file size, and RunPod limit was reached. Fixed by transcoding to JPEG q88 for the round-trip while keeping R2 storage as PNG.
-- **Native JSON.stringify choked on `PageVersion.seed` BigInt** — fixed with `BigInt.prototype.toJSON` patch in `app.ts`.
-- **Flat `pageVersions[]` in GET response was hard to render** — restructured to nested `pages[].variants[]` with all 24 pages included so frontend can render the full book with paywall overlays on non-preview pages.
+**Order lifecycle**
+- **`OrderStatus` is 9 values:** `CREATED`, `PAID`, `GENERATED`, `CONFIRMED`, `SHIPROCKET_FAILED`, `READY_TO_SHIP`, `SHIPPED`, `DELIVERED`, `CANCELLED`. Migration `20260818214132_update_order_status_enum` replaced the old enum outright; it cost nothing because no `Order` rows existed.
+- **Customer-facing status is derived, never stored** — `toPublicStatus()` in `src/utils/orderStatusMapping.ts` collapses the 9 internal values into 7 strings. `CONFIRMED` / `SHIPROCKET_FAILED` / `READY_TO_SHIP` all read as `"Printing"`, because a Shiprocket failure is an ops concern and not something to worry a customer with. Renaming a stage is one line and no migration.
+- **The `Order` row is created at checkout initiation, not at payment success.** An abandoned checkout leaves a `CREATED` row that is cheap, filterable, and the natural anchor for a future "resume payment" flow.
 
----
+**`initiateCheckout` shape**
+- **Guard order:** exists → not expired → `PREVIEW_READY` → has `userId` → has `coverType` → has all seven shipping fields.
+- **Idempotent while `CREATED`:** a repeat call returns the same `razorpayOrderId` rather than creating a second Razorpay order. Any later order status 409s.
+- **`Country.code` (ISO alpha-2) is the lookup key**, `Country.currencyCode` supplies the currency, and `isInternational` is snapshotted as `code !== "IN"`. Inactive countries are refused.
+- **A missing `PricingRule` logs at `error` and returns 404.** Configuration gap on our side, not user error.
+- **The Razorpay order is created OUTSIDE the transaction; the `Order` row and the `PREVIEW_READY → AWAITING_PAYMENT` flip go INSIDE one.** External system can't participate in Prisma rollback.
+- **The session flip uses `updateMany` with `status: "PREVIEW_READY"` in the WHERE**, not `update`.
+- **(Aug 21) `checkoutParamsSchema` wired via `safeParse` + `ValidationError`.** Reinforces the general "never raw `.parse()` in a controller" rule; the schema had been written but never imported.
 
-## SUPERSEDED (kept only when useful context)
+**Razorpay webhook**
+- **`payment.captured` is the sole state-changing event.** `payment.failed` logs error code + description for support and changes nothing. `order.paid` and everything else are logged and ignored.
+- **Idempotency at two layers, deliberately.** Transport layer: `WebhookEvent.eventId @unique` (the payment id, falling back to the order entity id); a `P2002` on insert means a duplicate delivery and returns early. Business layer: `payment.captured` no-ops when the `Order` is already past `CREATED`. **(Aug 21 refinement)** The business-layer check now allows a retry through when the `Order` is `PAID` but the Session is still `PAID` — that shape means the previous webhook attempt flipped the Order but the paid-page enqueue failed. Second webhook attempt re-runs the enqueue. `Order` flip in the transaction is idempotent (`updateMany` with status guard), so re-running it is a safe no-op.
+- **(Aug 21) Enqueue failure re-throws; controller returns 500; Razorpay retries.** Before re-throwing, the `WebhookEvent` row is deleted so the P2002 dedupe path doesn't block the retry. This replaces the earlier catch-and-log approach that stranded PAID sessions forever whenever Redis was down. The Order/Session status pair remain the real idempotency anchor; losing the WebhookEvent row on retry is fine.
+- **`WebhookEvent` is written before the payload is dispatched**, so even an ignored event type leaves an audit trail. The `orderId` FK is backfilled afterwards, best-effort, inside a `.catch()`.
+- **`PAID` then `GENERATING_PAID` is a two-step flip on purpose** — the same shape as `triggerGeneration`. Recovery when the second step fails is Razorpay's webhook retry (see above), not user-driven regenerate.
+- **A payment with no matching local `Order` logs at `error` and returns normally.** An orphan payment is an admin task; retrying it just buries the signal.
 
-- **"No userId on OrderSession"** (before July 13) → superseded when customer auth added.
-- **"Warm Python Flask server needed"** (July 10) → superseded July 13, validation moved to frontend.
-- **"Node serverless + Python always-on hosting"** (July 10) → superseded July 13, single Cloud Run service.
-- **"Deploy ComfyUI via network volume + base image (Option A)"** → superseded by comfy.getrunpod.io as recommended path.
-- **"SD variant cap: 3/page. HD variant cap: 8/page."** → superseded July 25 by payment-based caps.
-- **"Sharp text stamping runs LAST after all ComfyUI generation."** → superseded July 25; text is stamped FIRST.
-- **"Two endpoints total: face-swap + HD upscale."** → superseded July 25; HD stage removed.
-- **"Comic.coverThumbnailUrl String? (single thumbnail per comic)"** → superseded July 28; multi-thumbnail array.
-- **"Publish flow includes async ComfyUI asset sync worker"** → superseded July 28 by single-LoRA + base64 architecture.
-- **"Page artwork/masks live in the private R2 bucket; `artworkUrl` stores a bare key"** → superseded July 29; public bucket, full URL stored.
-- **"Bubble x/y/width/height are pixel coordinates"** → superseded July 29 by normalized fractions.
-- **"`Bubble.fontSize Int @default(24)` (pixels)"** → superseded July 29 by `Float @default(0.02)`.
-- **"Modifying face-swap positive/negative prompts per request is rejected"** → superseded August 2026 for node 111 (patched from `Page.pagePrompt`). Node 473 (negative) still not modified.
-- **"`Page.pagePrompt` is retained-but-unused; face-swap prompts hardcoded in workflow"** → superseded August 2026; now required per page.
-- **"BullMQ concurrency must match RunPod Max Workers = 3"** → superseded August 2026; both bumped to 5.
-- **"Font upload keys should include `randomUUID()`"** → tried and reverted mid-session August 2026; sequential-only contract stays.
-- **"BullMQ priority formula: `orderSession.createdAt.getTime() + (page.pageNumber * 100000)`"** → superseded August 7, 2026 by `sessionSecondsInDay + (pageNumber * 80_000)`. Original formula exceeded BullMQ's 21-bit priority ceiling (2,097,151). Compressed to fit while preserving ordering behavior.
-- **"Backend Python photo validation with `POST /sessions/:id/photo/validate`"** → superseded August 7, 2026. Validation moved fully to frontend MediaPipe.js. Endpoint renamed `POST /sessions/:id/photo/confirm`, service `confirmSessionPhoto`, schema `photoConfirmSchema`. Legacy Python service file remains on disk pending overall Python cleanup.
-- **"Preview page selection: pages 1 through `freePreviewPages`"** → superseded August 7, 2026 by `isPreviewPage: true` filter. Admin picks specific pages, not necessarily the first N.
-- **"Flat `pageVersions[]` in GET /sessions response"** → superseded August 7, 2026 by nested `pages[].variants[]` shape with all comic pages included.
-- **"Session status transitions to `GENERATING_PREVIEW` before enqueue"** → superseded August 7, 2026; flip happens AFTER enqueue succeeds so failure is recoverable.
-- **"`maybeMarkPreviewReady` counts against `Comic.freePreviewPages`"** → superseded August 11, 2026. It counts `page.count({ comicId, isPreviewPage: true })`, consistent with the `isPreviewPage` source-of-truth rule. The old wording would have reintroduced the drift bug that rule exists to prevent.
-- **"`maybeMarkPreviewReady` locks the OrderSession row / fires exactly once"** → corrected August 11, 2026. Plain `findUnique` + status guard, no row lock.
-- **"Orphaned QUEUED rows are an unresolved loose end"** → superseded August 11, 2026; `enqueuePreviewGenerationJobs` is re-entrant and recovers them.
-- **"`page:ready` → `{ type, pageNumber, variantIndex, imageUrl, pageVersionId }`"** → superseded August 2026; `displayImageUrl` added.
-- **"Each GET variant exposes `finalImageUrl` only"** → superseded August 2026; `displayImageUrl` added alongside it.
-- **"Seed conversion: `Number(seed)` from BigInt before stringify"** → corrected August 11, 2026; the conversion runs the other way and only at DB-write time.
-- **"Page artwork/mask are the only R2 assets `deleteComic` cleans up"** → corrected August 11, 2026; it sweeps thumbnails *and* every page's artwork and mask.
+**Paid-page generation**
+- **`enqueuePaidGenerationJobs` mirrors `enqueuePreviewGenerationJobs` exactly**, with the filter inverted to `isPreviewPage: false`. Same orphan-row recovery, same `$transaction` insert, same enqueue-after-commit, same `computeJobPriority`.
+- **(Aug 21) `maybeMarkPaidReady` now exists** — see the SD worker orchestration section above. Wired into `generationWorker.ts` alongside `maybeMarkPreviewComplete`; whichever helper's `isPreviewPage` filter doesn't match the finished page returns `not-done` and no-ops. Fires from both success and failure paths.
+
+**Send-to-print & PDF compilation (added Aug 21)**
+- **State machine post-CONFIRMED has explicit failure branches:** `COMPILING_PDF → PDF_FAILED` and `SHIPMENT_QUEUED → SHIPMENT_FAILED`. Both terminal, both require admin retry. Full chain:

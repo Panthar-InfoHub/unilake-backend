@@ -79,3 +79,23 @@ export function emitSessionPreviewReady(sessionId: string) {
     }
   }
 }
+
+export function emitSessionPaidReady(sessionId: string) {
+  const sockets = getRoom(sessionId);
+
+  if (!sockets) {
+    logger.debug(
+      { sessionId },
+      "emitSessionPaidReady: no sockets connected, skipping",
+    );
+    return;
+  }
+
+  const message = JSON.stringify({ type: "session:paid-ready" });
+
+  for (const ws of sockets) {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(message);
+    }
+  }
+}

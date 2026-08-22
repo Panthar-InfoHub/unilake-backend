@@ -4,6 +4,7 @@ import { config } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { setupWebSocket } from './websocket/wsServer.js';
 import { initJobs } from './jobs/workers/index.js';
+import "./lib/razorpay.js";
 
 
 const server = http.createServer(app) 
