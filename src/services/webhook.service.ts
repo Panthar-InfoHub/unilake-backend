@@ -20,7 +20,8 @@ import { Prisma } from "../generated/prisma/client.js";
 
 export async function handleRazorpayWebhook(
   rawBody: Buffer,
-  signature: string | undefined
+  signature: string | undefined,
+  deliveryEventId: string | undefined
 ): Promise<void> {
   // 1. Signature check
   if (!signature) {
@@ -42,8 +43,25 @@ export async function handleRazorpayWebhook(
 
   const eventType: string = payload.event;
   const paymentEntity = payload.payload?.payment?.entity;
-  const eventId: string | undefined =
+  const entityId: string | undefined =
     paymentEntity?.id ?? payload.payload?.order?.entity?.id;
+
+  // Idempotency key.
+  //
+  // `x-razorpay-event-id` is unique per EVENT and stable across Razorpay's
+  // retries of that event — exactly what this needs.
+  //
+  // It must NOT be the payment id. A single payment emits payment.authorized,
+  // order.paid AND payment.captured, all carrying the same payment id. Keying on
+  // it meant whichever event landed first claimed the unique constraint, and
+  // every later one — including the only event that mutates state,
+  // payment.captured — was discarded as a duplicate and the order was stranded
+  // at CREATED forever.
+  //
+  // The fallback keeps eventType in the key so that collision cannot return if
+  // the header is ever absent.
+  const eventId: string | undefined =
+    deliveryEventId ?? (entityId ? `${eventType}:${entityId}` : undefined);
 
   if (!eventId) {
     logger.warn(

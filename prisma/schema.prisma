@@ -461,7 +461,7 @@ model WebhookEvent {
   order   Order?  @relation(fields: [orderId], references: [id])
 
   source      String // "razorpay" | "shiprocket"
-  eventId     String   @unique // razorpay_payment_id or shiprocket event id — prevents double-processing
+  eventId     String   @unique // the PROVIDER's own event id (x-razorpay-event-id) — unique per event, stable across that event's retries. Never the payment id: one payment emits several event types sharing it.
   eventType   String
   payloadJson Json
   processedAt DateTime @default(now())

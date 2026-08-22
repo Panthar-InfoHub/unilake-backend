@@ -12,9 +12,12 @@ export const razorpayWebhookHandler = asyncHandler(
     // express.raw() puts a Buffer here
     const rawBody = req.body as Buffer;
     const signature = req.header("x-razorpay-signature");
+    // Razorpay's own event identifier — unique per event, stable across its
+    // retries of that event. This is the idempotency key; see webhook.service.ts.
+    const eventId = req.header("x-razorpay-event-id");
 
     try {
-      await handleRazorpayWebhook(rawBody, signature);
+      await handleRazorpayWebhook(rawBody, signature, eventId);
       // Always 200 on success — signals Razorpay to stop retrying.
       res.status(200).json({ received: true });
     } catch (error) {
