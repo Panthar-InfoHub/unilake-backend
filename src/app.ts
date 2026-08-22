@@ -20,11 +20,11 @@ import webhookRouter from "./routes/webhooks.js";
 const app = express();
 app.set("trust proxy", 1);
 
-// const allowedOrigins = [
-//   "http://localhost:3000",
-//   "https://www.unilake.com",   // update to real domain when known
-//   "https://unilake.com",       // apex, if used
-// ];
+const allowedOrigins = [
+  "https://www.unilakekids.com",   // canonical production frontend
+  "https://unilakekids.com",       // apex — redirects to www, but be safe
+  "http://localhost:3000",         // local dev
+];
 
 app.use(
   pinoHttp({
@@ -33,7 +33,21 @@ app.use(
 );
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin(origin, callback) {
+      // No Origin header = same-origin navigation, curl, or Render's health check.
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+
+      // Vercel preview deployments get a fresh URL per branch.
+      // Public endpoints will work from these; anything needing a login will not
+      // (the cookie is scoped to .unilakekids.com). Drop this block if you don't
+      // want previews talking to production data.
+      if (/^https:\/\/unilake-frontend-[a-z0-9-]+\.vercel\.app$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error(`Not allowed by CORS: ${origin}`));
+    },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   })

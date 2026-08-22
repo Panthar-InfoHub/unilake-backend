@@ -46,14 +46,14 @@ export const auth = betterAuth({
       secure: isProd,
       httpOnly: true,
     },
-    // When you have the real domain, uncomment and update this:
-    // crossSubDomainCookies: isProd
-    //   ? { enabled: true, domain: ".unilake.com" }
-    //   : { enabled: false },
+    // since we have the real domain now we have uncommentted this block
+    crossSubDomainCookies: isProd
+      ? { enabled: true, domain: ".unilakekids.com" }
+      : { enabled: false },
   },
   trustedOrigins: [
-    "http://localhost:3000", // your frontend dev URL — adjust to your actual frontend port
-    // "https://unilake-backend-590672762351.asia-south1.run.app",
-    // "https://unilake-backend.onrender.com",
+    "http://localhost:3000",
+    "https://www.unilakekids.com",
+    "https://unilakekids.com",
   ],
 });

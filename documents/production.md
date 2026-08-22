@@ -1,34 +1,88 @@
-# Production Go-Live — URL Change Checklist
+# Production Go-Live — Step-by-Step Runbook
 
-**Target:** backend on **Render**, frontend on **Vercel**.
-Compiled by sweeping both codebases for every hardcoded URL, env-derived URL, and browser-facing origin.
+**Status:** backend deployed to Render, frontend deployed to Vercel, custom domains mapped and verified.
+**What's left:** point all the code and dashboards at the new domains.
 
-Placeholders used below:
-
-| Placeholder | Meaning |
-|---|---|
-| `<BACKEND>` | e.g. `https://unilake-backend.onrender.com` or `https://api.unilake.com` |
-| `<FRONTEND>` | e.g. `https://unilake.vercel.app` or `https://unilake.com` |
+Work through the steps in order. Do not skip ahead — Step 10 depends on everything before it.
 
 ---
 
-## 0. ⚠️ DECIDE THIS BEFORE ANYTHING ELSE — the cookie domain strategy
+## YOUR ACTUAL URLS
 
-Locally the frontend is `localhost:3000` and the backend `localhost:8080`. **Cookies ignore port numbers**, so Better Auth's session cookie set on `localhost` is sent to both. That is the *only* reason auth works today.
+| Thing | URL | Notes |
+|---|---|---|
+| **Frontend (canonical)** | `https://www.unilakekids.com` | Vercel. The apex 308-redirects here, so `www` is the real origin. |
+| Frontend (apex) | `https://unilakekids.com` | Redirects to `www` |
+| Frontend (Vercel default) | `https://unilake-frontend.vercel.app` | ⚠️ Still live. Login will NOT work here — see the note at the end of Step 1. |
+| **Backend** | `https://api.unilakekids.com` | Render |
+| Backend (Render default) | `https://unilake-backend.onrender.com` | ⚠️ Still enabled. Never put this in any config. |
+| **Shared parent domain** | `unilakekids.com` | This is what makes cookies work |
 
-On `*.vercel.app` + `*.onrender.com` these are two different registrable domains (both on the Public Suffix List). Two things break:
+### ✅ Why your setup is the right one
 
-1. **The session cookie is never sent to the Vercel origin.** `proxy.ts` reads the cookie in Next middleware, which runs on Vercel and only sees Vercel's own cookies. Every protected route will redirect to `/login` even for a signed-in user.
-2. **All API calls become third-party cookie requests.** `sameSite: "none"; secure: true` allows this in spec, but Brave blocks third-party cookies by default, Safari ITP blocks them, and Chrome is phasing them out. Login appears to succeed then doesn't persist.
+`www.unilakekids.com` and `api.unilakekids.com` share the registrable domain `unilakekids.com`, so browsers treat them as **the same site**. That means:
 
-### ✅ Recommended: one registrable domain, two subdomains
+- The session cookie can be set on `.unilakekids.com` and sent to both.
+- It is **first-party**, so Brave / Safari / Chrome third-party-cookie blocking does not apply.
+- `proxy.ts` (which runs on Vercel) can actually see the cookie.
 
+None of that would have been true on `*.vercel.app` + `*.onrender.com`.
+
+---
+
+# STEP 1 — Backend code changes
+
+## 1.1 `src/app.ts` — CORS allow-list
+
+**Replace** the hardcoded `origin: "http://localhost:3000"` (and delete the commented-out block above it):
+
+```ts
+const allowedOrigins = [
+  "https://www.unilakekids.com",   // canonical production frontend
+  "https://unilakekids.com",       // apex — redirects to www, but be safe
+  "http://localhost:3000",         // local dev
+];
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      // No Origin header = same-origin navigation, curl, or Render's health check.
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+
+      // Vercel preview deployments get a fresh URL per branch.
+      // Public endpoints will work from these; anything needing a login will not
+      // (the cookie is scoped to .unilakekids.com). Drop this block if you don't
+      // want previews talking to production data.
+      if (/^https:\/\/unilake-frontend-[a-z0-9-]+\.vercel\.app$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error(`Not allowed by CORS: ${origin}`));
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    credentials: true,
+  })
+);
 ```
-unilake.com       → Vercel   (frontend)
-api.unilake.com   → Render   (backend)
+
+> Keep `credentials: true` and keep `PATCH` in `methods`. The whole session flow breaks without either.
+
+## 1.2 `src/lib/auth.ts` — `trustedOrigins`
+
+```ts
+trustedOrigins: [
+  "http://localhost:3000",
+  "https://www.unilakekids.com",
+  "https://unilakekids.com",
+],
 ```
 
-Everything becomes first-party. Then enable the block already stubbed in `src/lib/auth.ts`:
+> This is a **separate list from CORS**. Better Auth rejects sign-in and OAuth callbacks from origins not listed here. Updating one and forgetting the other gives you a half-working login that is very confusing to debug.
+
+## 1.3 `src/lib/auth.ts` — enable cross-subdomain cookies 🔴 the important one
+
+Uncomment the stubbed block and set your real domain:
 
 ```ts
 advanced: {
@@ -38,179 +92,184 @@ advanced: {
     httpOnly: true,
   },
   crossSubDomainCookies: isProd
-    ? { enabled: true, domain: ".unilake.com" }   // leading dot = all subdomains
+    ? { enabled: true, domain: ".unilakekids.com" }  // leading dot = all subdomains
     : { enabled: false },
-}
+},
 ```
 
-Both Render and Vercel support custom domains on their free tiers. Do this before launch, not after.
+The leading dot is what lets `api.unilakekids.com` set a cookie that `www.unilakekids.com` can also send. Without this, login will appear to work and then not persist.
 
-### ⚠️ If shipping on raw `.vercel.app` + `.onrender.com` first
-
-- Do **not** enable `crossSubDomainCookies` — you cannot set a cookie on `.vercel.app` (public suffix); the browser rejects it.
-- `proxy.ts` must stop gating on the cookie (see §3.3) — it will never see one.
-- Expect auth to fail in Brave/Safari. Acceptable for a smoke test, not for real customers.
+Leave `sameSite`/`secure` exactly as they are — no change needed.
 
 ---
 
-## 1. 🔴 The cookie NAME changes in production
+# STEP 2 — Frontend code changes
 
-Better Auth `1.6.20` sets `useSecureCookies` to `true` automatically when the base URL protocol is `https`, and secure cookies receive a `__Secure-` prefix.
-*(Verified in `node_modules/better-auth/dist/cookies/index.mjs`.)*
+## 2.1 `proxy.ts` — the cookie name changes in production 🔴
 
-| Environment | Session cookie name |
-|---|---|
-| Local (`http://localhost:8080`) | `better-auth.session_token` |
-| Production (`https://…`) | `__Secure-better-auth.session_token` |
+Better Auth adds a `__Secure-` prefix to cookies whenever the base URL is `https`. Your middleware currently looks for the unprefixed name only, so **every protected route would bounce a logged-in user back to `/login`**.
 
-`frontend/proxy.ts` hardcodes the unprefixed name. It must accept both — see §3.3.
-
----
-
-## 2. BACKEND — code changes
-
-### 2.1 `src/app.ts` — CORS origin 🔴 blocking
-
-Currently hardcoded to a single local origin:
+**Replace:**
 
 ```ts
-app.use(cors({ origin: "http://localhost:3000", ... }));
+const SESSION_COOKIE_NAME = "better-auth.session_token";
 ```
 
-Must become an allow-list including the production frontend. Note the commented-out array at lines 23-27 — that was the intent.
-
-**Also plan for Vercel preview deployments**, which get a new random URL per branch (`unilake-git-xyz-team.vercel.app`). A static array will fail CORS on every preview. Either use a function origin matching `/\.vercel\.app$/`, or accept that previews can't call the API.
-
-Keep `credentials: true` and keep `PATCH` in `methods` — the session flow depends on both.
-
-### 2.2 `src/lib/auth.ts` — `trustedOrigins` 🔴 blocking
+**With:**
 
 ```ts
-trustedOrigins: [
-  "http://localhost:3000",   // ← keep for local dev
-  "<FRONTEND>",              // ← add
-],
+// Better Auth prefixes cookies with "__Secure-" whenever the base URL is https,
+// so the name differs between local dev and production. Check both.
+const SESSION_COOKIE_NAMES = [
+  "__Secure-better-auth.session_token", // production
+  "better-auth.session_token",          // local dev
+];
 ```
 
-Better Auth rejects OAuth callbacks and sign-in requests from origins not on this list. **This is separate from CORS — updating one and not the other produces a confusing half-working state.**
+**And replace:**
 
-### 2.3 `src/lib/auth.ts` — `crossSubDomainCookies`
+```ts
+const sessionCookie = request.cookies.get(SESSION_COOKIE_NAME);
+const hasSession = Boolean(sessionCookie?.value);
+```
 
-Uncomment and set the real domain — only if you took the subdomain route in §0.
+**With:**
+
+```ts
+const hasSession = SESSION_COOKIE_NAMES.some(
+  (name) => Boolean(request.cookies.get(name)?.value)
+);
+```
+
+## 2.2 `next.config.ts` — fix the stale fallback
+
+The current fallback points at the **old Cloud Run backend**. If the env var is ever missing at build time, production silently proxies auth to a dead service.
+
+```ts
+destination: `${process.env.NEXT_PUBLIC_AUTH_URL || "https://api.unilakekids.com"}/api/auth/:path*`,
+```
 
 ---
 
-## 3. FRONTEND — code changes
+# STEP 3 — Commit and push
 
-### 3.1 `next.config.ts` — the hardcoded fallback 🔴 dangerous
+Push both repos. Render and Vercel will auto-deploy.
 
-```ts
-destination: `${process.env.NEXT_PUBLIC_AUTH_URL || "https://unilake-backend-590672762351.asia-south1.run.app"}/api/auth/:path*`
-```
-
-That fallback is the **old Cloud Run backend**. If `NEXT_PUBLIC_AUTH_URL` is ever missing at build time, production silently proxies auth to a dead/stale service with no error. Replace the fallback with the real backend URL, or drop the fallback so a missing env var fails loudly.
-
-### 3.2 `NEXT_PUBLIC_*` is baked in at BUILD time 🔴
-
-Next.js inlines `NEXT_PUBLIC_` variables into the client bundle during `next build`. Setting `NEXT_PUBLIC_AUTH_URL` in Vercel **after** a build does nothing until you **redeploy**. Every URL change on the frontend needs a rebuild, not a restart.
-
-Files that read it — all correct, nothing to change, but all break together if it's wrong:
-
-| File | Uses it for |
-|---|---|
-| `app/lib/axios.ts` | REST `baseURL` |
-| `app/lib/auth-client.ts` | Better Auth client `baseURL` |
-| `app/lib/websocket.ts` | derives `wss://` host — auto-upgrades from `https` |
-| `app/actions/heroimage/index.ts` | a bare `fetch` for public hero images |
-| `next.config.ts` | the `/api/auth/*` rewrite |
-
-### 3.3 `proxy.ts` — the cookie gate 🔴 blocking
-
-Three problems, all in this one file:
-
-1. **Cookie name** — hardcodes `better-auth.session_token`; production uses `__Secure-better-auth.session_token` (§1). Check both.
-2. **Cross-domain** — on split domains the middleware never sees the cookie at all. If you are not on shared subdomains, remove the cookie gate and let the page-level `useAuth` handle redirects.
-3. **`user_role` cookie is never set by the backend.** `PROTECTED_ADMIN_ROUTES` is currently `[]` so nothing depends on it today, but if you ever populate that array, every admin will be redirected away. Gate `/admin` server-side instead.
+**Do not continue to Step 10 (verification) until both deploys are green.** Steps 4–9 can be done while they build.
 
 ---
 
-## 4. BACKEND — environment variables on Render
+# STEP 4 — Render environment variables
 
-| Variable | Change? | Value / note |
+Dashboard → your service → **Environment**.
+
+| Variable | Set to | Why |
 |---|---|---|
-| `BETTER_AUTH_URL` | ✅ **Yes** | `<BACKEND>` — must be the **backend's own** public URL, not the frontend's. Drives the OAuth callback base *and* the `__Secure-` prefix. |
-| `NODE_ENV` | ✅ **Yes** | `production` — flips cookies to `sameSite=none; secure=true`. Without it, cross-site auth cannot work at all. |
-| `PORT` | ⚠️ | Render injects this automatically. `env.ts` hard-exits if it's missing, so leave it unset in the dashboard and let Render provide it. |
-| `R2_PUBLIC_URL_BASE` | ⚠️ Maybe | If still on an `*.r2.dev` dev URL, move to a custom domain (`cdn.unilake.com`). **Changing it breaks every URL already stored in the DB** — those rows hold full absolute URLs. Decide before real orders exist. |
-| `RAZORPAY_KEY_ID` / `KEY_SECRET` | ✅ **Yes** | Swap test → **live** keys when going truly live |
-| `RAZORPAY_WEBHOOK_SECRET` | ✅ **Yes** | New secret for the production webhook (§6.3) |
-| `DATABASE_URL` / `DIRECT_URL` | ❌ No | Neon URL is environment-independent |
-| `REDIS_URL` | ❌ No | Upstash URL unchanged |
-| `R2_ACCOUNT_ID`, `R2_*_BUCKET_NAME`, `R2_ENDPOINT`, keys | ❌ No | Account-level, not environment-level |
-| `RUNPOD_ENDPOINT_ID` / `RUNPOD_API_KEY` | ❌ No | External API |
-| `GOOGLE_CLIENT_ID` / `SECRET`, `FACEBOOK_*` | ❌ No | Same app — only the *redirect URIs in their dashboards* change (§6.1, §6.2) |
-| `BETTER_AUTH_SECRET` | ❌ No | But generate a **different** secret for prod than dev |
+| `BETTER_AUTH_URL` | `https://api.unilakekids.com` | 🔴 The **backend's own** URL, not the frontend's. Drives the OAuth callback base *and* triggers the `__Secure-` cookie prefix. |
+| `NODE_ENV` | `production` | 🔴 Flips cookies to `secure: true` and enables `crossSubDomainCookies`. Without it, Step 1.3 does nothing. |
+| `RAZORPAY_WEBHOOK_SECRET` | new production secret | Must match Step 7 exactly |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | live keys | Only when taking real money — test keys are fine to start |
+| `BETTER_AUTH_SECRET` | a **new** random value | Don't reuse your dev secret in production |
 
-> 🔴 **No quotes around any value.** `dotenv` strips them locally; Render does not. A quoted URL becomes `%22https://...%22` and fails opaquely.
+**Leave alone** (already correct, environment-independent): `DATABASE_URL`, `DIRECT_URL`, `REDIS_URL`, all `R2_*`, `RUNPOD_*`, `GOOGLE_*`, `FACEBOOK_*`.
+
+**Do not set `PORT`.** Render injects it automatically.
+
+> 🔴 **No quotes around any value.** `dotenv` strips quotes locally; Render does not. A quoted URL becomes `%22https://...%22` and fails in a way that is very hard to spot.
 
 ---
 
-## 5. FRONTEND — environment variables on Vercel
+# STEP 5 — Vercel environment variables
+
+Dashboard → project → **Settings → Environment Variables** → scope **Production**.
 
 | Variable | Value |
 |---|---|
-| `NEXT_PUBLIC_AUTH_URL` | `<BACKEND>` — **no trailing slash** (`websocket.ts` strips the protocol by regex and a trailing slash yields a `//` path) |
+| `NEXT_PUBLIC_AUTH_URL` | `https://api.unilakekids.com` |
 | `NEXT_PUBLIC_APP_ENV` | `production` |
 
-Set these for **Production**, **Preview**, and **Development** scopes as appropriate, then **redeploy** (§3.2).
+> 🔴 **No trailing slash** on the URL. `websocket.ts` strips the protocol with a regex; a trailing slash produces `wss://api.unilakekids.com//?sessionId=...` and the handshake fails.
+
+> 🔴 **`NEXT_PUBLIC_*` values are baked into the JS bundle at build time.** Setting them now does nothing to an already-built deployment. **Redeploy after saving** (Deployments → ⋯ → Redeploy). Every future change to these needs a rebuild, not a restart.
 
 ---
 
-## 6. EXTERNAL DASHBOARDS
+# STEP 6 — Google OAuth
 
-### 6.1 Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client
+Google Cloud Console → **APIs & Services → Credentials** → your OAuth 2.0 Client ID.
 
-| Field | Add |
-|---|---|
-| **Authorized JavaScript origins** | `<FRONTEND>` |
-| **Authorized redirect URIs** | `<BACKEND>/api/auth/callback/google` |
+**Authorized JavaScript origins** — add:
+```
+https://www.unilakekids.com
+https://unilakekids.com
+```
 
-> 🔴 The redirect URI points at the **BACKEND**, not the frontend. Better Auth handles the callback server-side at `/api/auth/callback/:provider`. This is the single most common go-live mistake.
+**Authorized redirect URIs** — add:
+```
+https://api.unilakekids.com/api/auth/callback/google
+```
 
-Keep the localhost entries so local dev keeps working. Changes can take a few minutes to propagate.
+> 🔴 The redirect URI points at the **BACKEND** (`api.`), not the frontend. Better Auth handles the callback server-side. Putting the frontend URL here is the single most common go-live mistake.
 
-### 6.2 Facebook for Developers → your App → Facebook Login → Settings
+Keep the existing `localhost` entries so local dev keeps working. Google can take a few minutes to propagate.
+
+---
+
+# STEP 7 — Facebook OAuth
+
+developers.facebook.com → your App.
+
+**Facebook Login → Settings → Valid OAuth Redirect URIs:**
+```
+https://api.unilakekids.com/api/auth/callback/facebook
+```
+
+**Settings → Basic:**
+- **App Domains:** `unilakekids.com`
+- **Site URL:** `https://www.unilakekids.com`
+- **Privacy Policy URL:** required before the app can leave Development Mode
+
+**Switch the app out of Development Mode.** Until you do, only accounts listed as app admins/testers can log in. This may need App Review — start it early if Facebook login matters at launch.
+
+---
+
+# STEP 8 — Razorpay webhook
+
+Dashboard → **Settings → Webhooks** → Add New Webhook.
 
 | Field | Value |
 |---|---|
-| **Valid OAuth Redirect URIs** | `<BACKEND>/api/auth/callback/facebook` |
-| **App Domains** (Basic Settings) | backend + frontend domains |
-| **Site URL** | `<FRONTEND>` |
+| **Webhook URL** | `https://api.unilakekids.com/api/webhooks/razorpay` |
+| **Secret** | exactly what you set for `RAZORPAY_WEBHOOK_SECRET` in Step 4 |
+| **Active Events** | ✅ `payment.captured` (required) ✅ `payment.failed` (recommended) |
 
-Facebook also requires the app to be **switched out of Development Mode** and to have a **privacy-policy URL** before non-admin users can log in. Plan for review time.
+Then **delete the old ngrok webhook** — it's dead and will just generate failure noise.
 
-### 6.3 Razorpay Dashboard → Settings → Webhooks
+> ⚠️ **Test mode and Live mode have separate webhook lists.** Configuring one does not configure the other. If you're still on test keys, set up the test-mode webhook now and the live one when you switch keys.
 
-| Field | Value |
-|---|---|
-| **Webhook URL** | `<BACKEND>/api/webhooks/razorpay` |
-| **Secret** | must match `RAZORPAY_WEBHOOK_SECRET` on Render, byte-for-byte |
-| **Active Events** | `payment.captured` (required), `payment.failed` (recommended) |
+> 🔴 A secret mismatch produces a silent `400` and **no state change**: the payment succeeds, the session sits at `AWAITING_PAYMENT` forever, and the frontend's verifying overlay times out with no clue why. Copy-paste the secret; don't retype it.
 
-Delete or disable the old ngrok webhook. Note that **test-mode and live-mode webhooks are configured separately** — setting one does not set the other.
+---
 
-> A secret mismatch produces a silent `400` and **no state change**: payment succeeds, the session sits at `AWAITING_PAYMENT` forever, and the frontend's verifying overlay times out with no clue why.
+# STEP 9 — Cloudflare R2 CORS
 
-### 6.4 Cloudflare R2 → **both** buckets → Settings → CORS Policy
+The browser uploads files **directly** to R2 using presigned URLs, so R2 itself has to allow your domain. Do this for **BOTH** buckets:
 
-The browser PUTs files directly to presigned R2 URLs (`app/lib/r2-upload.ts`), so R2 itself must allow the Vercel origin.
+- `unilake-public` — comic thumbnails, page artwork, hero images, team photos, review videos
+- `unilake-private` — **the child's photo** and font files
 
-Update **`unilake-public`** *and* **`unilake-private`** — the child's photo and fonts go to the private bucket, comic thumbnails / page artwork / hero images / team photos / review videos to the public one. Updating only one leaves half the uploads broken.
+Updating only one leaves half your uploads broken.
+
+R2 → bucket → **Settings → CORS Policy**:
 
 ```json
 [
   {
-    "AllowedOrigins": ["<FRONTEND>", "http://localhost:3000"],
+    "AllowedOrigins": [
+      "https://www.unilakekids.com",
+      "https://unilakekids.com",
+      "http://localhost:3000"
+    ],
     "AllowedMethods": ["PUT", "GET", "HEAD"],
     "AllowedHeaders": ["content-type"],
     "ExposeHeaders": ["ETag"],
@@ -219,46 +278,157 @@ Update **`unilake-public`** *and* **`unilake-private`** — the child's photo an
 ]
 ```
 
-`AllowedHeaders` must include `content-type` — the uploader sets it explicitly to match the signed content type.
+`AllowedHeaders` **must** include `content-type` — the uploader sets it explicitly to match the signed content type, and the request fails preflight without it.
 
-### 6.5 Render service settings
+### Optional, but decide now: `R2_PUBLIC_URL_BASE`
 
-- **Health check path:** `/health` (returns a plain string, not JSON)
-- **Instance type:** ⚠️ the **free tier spins down after ~15 minutes of inactivity**. That kills the in-process BullMQ workers *and* the hourly expiry sweeper, and adds a 50s+ cold start on the first request. Generation jobs enqueued to Redis survive, but nothing processes them until a request wakes the service. **Use a paid instance**, or accept broken background processing.
-- **RAM:** PDF compilation runs at worker concurrency 5 with ~120 MB peak per job. 512 MB is not enough — budget 2 GB.
-- **Single instance only.** WebSocket rooms are an in-memory `Map` and the photo cache is per-process. Scaling past one instance silently breaks live page updates. Do not enable autoscaling.
+If this is still an `*.r2.dev` URL, you may want `cdn.unilakekids.com` instead.
+
+> 🔴 **This is a one-way door.** Every thumbnail, page artwork and generated image URL is stored in the database as a **full absolute URL**. Changing the base later leaves every existing row pointing at a dead host. Change it **before** real orders exist, or never.
 
 ---
 
-## 7. NO CHANGE NEEDED — don't waste time here
+# STEP 10 — Render service settings
+
+Dashboard → your service → **Settings**.
+
+| Setting | Value | Why |
+|---|---|---|
+| **Health Check Path** | `/health` | Returns a plain string, not JSON |
+| **Instance Type** | ⚠️ **paid, not free** | See below |
+| **Memory** | 2 GB | PDF compilation peaks at ~120 MB × 5 concurrent jobs |
+| **Instances** | **exactly 1** — no autoscaling | See below |
+
+### 🔴 Why the free tier will break this app
+
+Render's free tier **spins the service down after ~15 minutes of inactivity.** Your BullMQ workers run *inside the web process*, so a spun-down service means:
+
+- Queued generation jobs sit in Redis and nothing processes them
+- The hourly session-expiry sweeper never runs
+- The first request after idling takes 50+ seconds
+
+Jobs aren't lost — they resume when something wakes the service — but a customer watching a progress bar will see nothing happen.
+
+### 🔴 Why it must stay at one instance
+
+WebSocket rooms are an in-memory `Map` and the photo cache is per-process. With two instances, a user connected to instance A never receives events emitted by instance B — live page updates silently stop working for roughly half your users. **Do not enable autoscaling.**
+
+---
+
+# STEP 11 — Verify, in this exact order
+
+Each step isolates one failure mode. If a step fails, fix it before moving on.
+
+### 1. Backend is alive
+```
+https://api.unilakekids.com/health
+```
+Expect: `App is working perfectly fine!`
+
+### 2. CORS works
+Open `https://www.unilakekids.com`, DevTools → **Network**.
+The homepage calls `/api/public/comics`, `/api/public/hero-images`, etc.
+Expect: **200**, with response header `access-control-allow-origin: https://www.unilakekids.com`.
+❌ Fails → Step 1.1.
+
+### 3. Login works
+Sign in with Google.
+Expect: redirect to Google → back to your site → logged in.
+❌ `redirect_uri_mismatch` → Step 6.
+❌ "untrusted origin" → Step 1.2.
+
+### 4. The cookie is correct 🔴 the critical check
+DevTools → **Application → Cookies**.
+
+| Check | Expected |
+|---|---|
+| Name | `__Secure-better-auth.session_token` |
+| Domain | `.unilakekids.com` ← **with the leading dot** |
+| Secure | ✓ |
+| HttpOnly | ✓ |
+
+❌ Domain shows `api.unilakekids.com` (no dot) → Step 1.3 didn't take effect. Check `NODE_ENV=production` is actually set on Render.
+
+### 5. The session persists
+Hard-refresh the page. Still logged in?
+❌ No → the cookie domain is wrong (step 4).
+
+### 6. Protected routes work
+Visit `/dashboard` while logged in.
+Expect: the dashboard loads.
+❌ Bounced to `/login` → Step 2.1 (cookie name), and confirm Vercel was **redeployed** after Step 5.
+
+### 7. Photo upload works
+Start a comic, upload a child's photo.
+❌ CORS error on the R2 `PUT` → Step 9, specifically the **private** bucket.
+
+### 8. Live generation works
+Watch the preview pages appear.
+- Pages appearing **without refreshing** → WebSocket is fine ✅
+- Nothing appears, but refreshing shows the images → the socket failed. Check `NEXT_PUBLIC_AUTH_URL` has no trailing slash, and confirm `wss://api.unilakekids.com/?sessionId=...` in the Network → WS tab.
+
+### 9. Payment works end to end
+Run a checkout with a Razorpay **test** card first.
+Render logs should show, in order:
+```
+Payment captured — Order + Session flipped to PAID
+Paid-page generation enqueued after payment
+```
+❌ Neither line appears → the webhook isn't arriving → Step 8. Check Razorpay Dashboard → Webhooks → your webhook → **recent deliveries** for the actual response code.
+
+### 10. The verifying screen resolves
+After payment, the "Verifying your payment" overlay should disappear on its own within a few seconds and land you on the generation page.
+❌ Times out after 90s → the webhook didn't land (step 9).
+
+### 11. Test in Brave and Safari
+Not just Chrome. Your cookie setup should be fine now that everything is first-party, but this is where you actually prove it.
+
+---
+
+# TROUBLESHOOTING — symptom → cause
+
+| Symptom | Almost certainly |
+|---|---|
+| CORS error in console | Step 1.1 — origin not in the allow-list |
+| `redirect_uri_mismatch` from Google | Step 6 — the URI must be the `api.` domain |
+| Login succeeds, then logged out on refresh | Step 1.3 — cookie domain missing the leading dot, or `NODE_ENV` not `production` |
+| `/dashboard` redirects to `/login` while logged in | Step 2.1 — the `__Secure-` cookie name |
+| Frontend still calling `localhost:8080` | Step 5 — Vercel not redeployed after setting the env var |
+| Photo upload fails, thumbnails upload fine | Step 9 — CORS missing on the **private** bucket |
+| Payment succeeds, session stuck at `AWAITING_PAYMENT` | Step 8 — webhook URL or secret wrong |
+| Pages only appear after a manual refresh | WebSocket down — check for a trailing slash in `NEXT_PUBLIC_AUTH_URL` |
+| Everything works, then breaks after ~15 min idle | Step 10 — Render free tier spin-down |
+
+---
+
+# NOTES ON THE TWO EXTRA DOMAINS
+
+Both of your platforms still serve a default URL alongside the custom domain.
+
+**`unilake-frontend.vercel.app`** — public pages work, but **login will not**, because the session cookie is scoped to `.unilakekids.com`. Don't test auth here and don't share the link. Optionally remove it from the project's domain list once you're confident.
+
+**`unilake-backend.onrender.com`** — still enabled ("Render Subdomain" toggle). Harmless to leave on, and handy for debugging if DNS ever misbehaves. But **never put it in any config value** — `BETTER_AUTH_URL`, `NEXT_PUBLIC_AUTH_URL`, OAuth redirect URIs and the Razorpay webhook must all use `api.unilakekids.com`. Consider disabling it once everything is verified, so there's exactly one canonical origin.
+
+---
+
+# STILL OUTSTANDING (not blocking launch)
+
+- **LoRA file handling is not done** — deferred, to be figured out later.
+- **Admin role is assigned manually in the database.** There is no UI. After your first production login, set your user's `role` to `ADMIN` directly in Neon or `/admin` stays inaccessible.
+- **No rate limiting** on any public route, including `/checkout` and session creation. Known gap (feature #9).
+- **Shiprocket is a stub.** Sessions reach `COMPLETED` without a real shipment being created.
+- **`notifyUser` does not exist.** No emails are sent at any stage — not on generation complete, not on payment, not on send-to-print.
+
+---
+
+# REFERENCE — things that look like URLs but need no change
 
 | Thing | Why |
 |---|---|
-| `src/websocket/wsServer.ts` — `new URL(req.url, "http://localhost")` | A parsing base for a relative URL. Never dialled. Leave it. |
-| `src/jobs/workers/sd/runpodClient.ts` — `https://api.runpod.ai/v2` | External API endpoint |
-| `textStamp.ts` — `http://www.w3.org/2000/svg` | An XML namespace identifier, not a URL |
+| `src/websocket/wsServer.ts` — `new URL(req.url, "http://localhost")` | A parsing base for a relative URL. Never dialled. |
+| `src/jobs/workers/sd/runpodClient.ts` — `https://api.runpod.ai/v2` | External API |
+| `src/jobs/workers/sd/textStamp.ts` — `http://www.w3.org/2000/svg` | An XML namespace, not a URL |
 | `next.config.ts` — `images.remotePatterns` | Already `hostname: "**"` |
-| Neon / Upstash / RunPod URLs | Environment-independent |
-| WebSocket URL in `app/lib/websocket.ts` | Derived from `NEXT_PUBLIC_AUTH_URL`; auto-upgrades `https` → `wss` |
-
----
-
-## 8. POST-DEPLOY VERIFICATION — in this order
-
-1. `GET <BACKEND>/health` → `"App is working perfectly fine!"`
-2. Open `<FRONTEND>`, DevTools → Network. Confirm public calls (`/api/public/comics`) return 200 with `access-control-allow-origin: <FRONTEND>`. A CORS failure here = §2.1.
-3. Log in with Google. Confirm the callback lands and **check Application → Cookies for `__Secure-better-auth.session_token`** on the expected domain. Missing = §0/§1.
-4. Reload the page. Still logged in? If not, third-party cookies are being blocked → §0.
-5. Create a session, upload a photo. An upload failure = §6.4 (R2 CORS on the **private** bucket).
-6. Watch preview generation. Pages arriving live = WebSocket is fine. Nothing arriving but a refresh shows images = the socket failed; check `wss://` and Render's WebSocket support.
-7. Run a real checkout with a **live** Razorpay key and a small amount. Confirm the backend logs `"Payment captured — Order + Session flipped to PAID"` then `"Paid-page generation enqueued after payment"`. Missing = §6.3.
-8. Confirm the session advances `AWAITING_PAYMENT → PAID → GENERATING_PAID` without a manual refresh.
-9. **Test in Brave or Safari**, not just Chrome. That is where the cookie strategy actually gets validated.
-
----
-
-## 9. STILL OUTSTANDING (carried over)
-
-- **LoRA file handling is not done** — deferred, to be figured out later.
-- Admin role is assigned **manually in the DB**; there is no UI. Remember to promote the production admin user after first login.
-- There is **no rate limiting** on any public route, including `/checkout`. Known gap (feature #9).
+| Neon / Upstash / RunPod connection strings | Environment-independent |
+| `app/lib/websocket.ts` | Derives the WS URL from `NEXT_PUBLIC_AUTH_URL`; auto-upgrades `https` → `wss` |
+| `sameSite` / `secure` in `auth.ts` | Already correct — no change needed for the subdomain setup |
