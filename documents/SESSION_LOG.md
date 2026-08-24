@@ -4,200 +4,169 @@
 
 ---
 
-## Session — August 21, 2026 — Five-bug sprint + three features shipped (paid-page completion, send-to-print, PDF compilation)
+## Session — August 24, 2026 — Full-project analysis, one data-loss bug fixed, three CMS modules built end to end
 
-**Triggered by:** Guts opened the session intending to verify what was built on August 19. The first-message summary asked for "where does the project stand" and included flagging the P1 data-loss bug from that session. Verification never happened — the session pivoted immediately into a defect+feature sprint once the scope of the open items became clear. The July 24 pattern of "audit then fix in the same session" repeated.
+**Triggered by:** Guts opened with "analyze both the projects completely" and no task. The analysis surfaced a data-loss bug and a frontend gap, which set the rest of the agenda: fix the bug, then design and build the three content modules the marketing site still needed (How It Works, FAQ, Blog). First session that went requirements → schema → plan → implementation → handoff docs in one pass.
 
-### Two distinct phases
+### Phase 1 — Analysis of both repos
 
-The whole session ran as one continuous build-and-verify loop with no separate phases, but two mental clusters:
+Read backend and frontend as two independent git repos under one folder. Two findings mattered:
 
-**Cluster A — the five defects.** Bugs 1, 2, 3, 4, 6 from the August 19 open list, worked in that priority order. Bug 5 (rate limiting) and Bug 7 (Country toggle) were deliberately deferred with recorded reasons.
+**The frontend post-payment path dead-ends.** `POST /api/user/sessions/:id/send-to-print` and `GET /api/user/orders` are built, irreversible, and **called by nothing** — grepped the whole frontend for `send-to-print`, `sendToPrint` and `api/user/orders`, all zero. There is no variant-selection UI. A customer who pays today cannot finish their order. Nine admin/dashboard pages are 17-line "🚧 Under construction" placeholders, three of them (feedback, customer-reviews, team-members) fronting backends that have been complete for weeks.
 
-**Cluster B — the three next features.** `maybeMarkPaidReady`, send-to-print, PDF compilation with pdf-lib. All three landed. Shiprocket stayed a stub deliberately.
+**`FRONTEND_HANDOFF.md` is badly stale** — still says checkout, payments, webhooks and orders are unbuilt and the SD worker is a stub. Conversely `PROJECT_CONTEXT.md` §6 claimed both order endpoints were broken by a `coverImageUrl` field that doesn't exist; the code had already been fixed Aug 21 and the doc wasn't updated. Drift in both directions.
 
-The two clusters shared a common working shape: analyze → get user's confirmation on design decisions → produce exact edits → verify via typecheck + boot. **No runtime testing was done.** Guts made this an explicit policy for the session — full end-to-end verification waits until after feature #4 (real Shiprocket) so the pipeline is real, not stubbed.
+### Phase 2 — The team-member bug
+
+Reviewing the three older CMS modules for integration-readiness found a real defect in `updateTeamMember`: it queued the old R2 photo for deletion whenever `imageKey` was present, with **no `oldUrl !== newUrl` comparison**. An edit form that resends every field on save — which is what React Hook Form does by default — would change the job title and silently delete the live photo from R2, leaving the DB row pointing at a 404. No error anywhere.
+
+`page.service.ts` has exactly this guard with a comment explaining why. `teamMember.service.ts` was written without it. Also fixed in the same pass: five optional fields were `.optional()` but not `.nullable()`, making them set-once-forever — no request could clear a LinkedIn URL once set.
+
+### Phase 3 — Schema design for the three new modules
+
+Deliberately front-loaded the questions instead of guessing. Two rounds of structured questions before writing any Prisma, then two more before each implementation plan. The shape that came out:
+
+- **How It Works** started as two tables (section + steps with `sortOrder`), and Guts asked whether it could be one. It could — steps became a `Json` array on a singleton row. That collapse removed 4 endpoints, a cascade, a reorder route, and the "which section is live" question, and it matches the existing full-array-PATCH rule for `Comic.coverThumbnailUrls`.
+- **FAQ** clarified to two *global* lists, not per-comic. `Faq` has no relation to `Comic` at all.
+- **Blog** landed on HTML body from a rich-text editor, auto-generated frozen slug, `isActive` rather than a status enum, and `tags String[]` (Guts overrode the earlier `category` answer, citing SEO).
+
+Guts asked directly whether the admin would have to write HTML by hand — answered no, explained the WYSIWYG → `getHTML()` → stored-HTML → sanitize-on-render flow, plus the three traps: base64-inlined images, Tailwind preflight flattening the article, and sanitize-on-render vs on-write.
+
+### Phase 4 — Implementation, three modules
+
+Each module: plan → questions → approval → implement → typecheck → smoke test. All 20 endpoints built, `tsc --noEmit` clean throughout.
 
 ### Decisions locked
 
-Full detail lives in `DECISIONS.md` under the Aug 21 additions. The load-bearing ones:
+Full detail in `DECISIONS.md` under the Aug 24 entries. The load-bearing ones:
 
-**Paid sessions are exempt from expiry.** `EXPIRY_EXEMPT_STATUSES` = `AWAITING_PAYMENT` + `POST_PAYMENT_STATUSES`. Checked in four places: both `assertNotExpired` copies, the sweeper, and the `isExpired` computation in `getOrderSessionId`. Abandoned `AWAITING_PAYMENT` sessions living forever is an accepted tradeoff — killing a session mid-payment (when the customer takes >24h from session-create to complete Razorpay) was strictly worse. Cleanup for abandoned checkouts is a separate concern with different rules.
+**Every asset-replace path needs an `oldUrl !== newUrl` guard.** Generalized from the team-member bug and applied to How It Works (video + poster) and Blog (cover) as they were written.
 
-**Razorpay webhook enqueue failures re-throw, not swallow.** The Aug 19 "PAID is regeneratable per DECISIONS" comment turned out to be false — `PAID` was never in `REGENERATABLE_STATUSES`. Considered adding it; rejected because `regeneratePage` is per-page and 14 stranded pages meant 14 button clicks. Instead: controller returns 500, Razorpay retries. Before re-throwing, delete the `WebhookEvent` row so P2002 dedupe doesn't block the retry. Two-layer idempotency (event row + Order/Session status) prevents double-processing. Refined the business-layer check to let a retry through when `Order.status = PAID` but `Session.status = PAID` — that shape means the prior attempt flipped Order but the enqueue failed, and the retry needs to re-run the enqueue.
+**`.optional()` without `.nullable()` on a nullable column is a bug, not a style choice** — it makes the field unclearable.
 
-**Post-payment PATCH lock covers 12 fields.** `updateOrderSession` at `AWAITING_PAYMENT` or later rejects `childName`, `age`, `pronounKey`, `coverType`, and all eight shipping fields. Only `notificationEmail` remains editable. The original bug description (audit 8.3) named only `childName` and `pronounKey`; expanded scope because the same "silently desyncs from what shipped" problem applies to every field baked into images or snapshotted onto Order. Silent PATCH acceptance was worse than blocking — customer thinks their edit landed, DB says one thing, printed image says another.
+**How It Works is a singleton with a JSON steps array**, `isActive` as a plain PATCH field, and backend-enforced public readiness (`isActive && videoUrl && steps.length > 0`).
 
-**Send-to-print carries selections for every page.** Not just paid pages. Guts explicitly walked through the UX: after payment the customer lands back on the same review screen with paid pages added, can still regenerate preview variants, and picks favorites across all pages before hitting Send-to-print. Server does not auto-select anything. My first design proposed auto-selecting preview variants server-side (Option B) — this was wrong for the UX and got pivoted before any code was written.
+**FAQ reorder is strict and infers its placement from the rows** — complete list for one placement, inactive rows included.
 
-**Send-to-print rejects if any PageVersion for the session is non-terminal**, not just the selected ones. If page 5 is mid-regenerating, the endpoint 409s naming page 5. Alternative — allow send-to-print as long as the selected variants are `SD_READY` — was considered and rejected because it made state hard to reason about (in-flight jobs pointlessly complete against a locked session).
-
-**Send-to-print is idempotent.** Second call at `CONFIRMED` re-enqueues the PDF job with `jobId: sessionId` (BullMQ dedupe) and returns success. No status change on retry. This was the cleanest way to handle "DB transaction committed → PDF enqueue failed → customer retries." Alternatives considered: (a) rollback the transaction if enqueue fails via compensating update (fragile), (b) enqueue-first-then-commit (breaks Redis-outside-transaction rule). Idempotent retry beat both.
-
-**Session state machine post-CONFIRMED has explicit failure branches.** Guts explicitly proposed collapsing all post-shipment states into `COMPLETED`. I pushed back — losing the distinction between "PDF done, waiting for shipment queue" and "shipment picked up by courier" means the PDF worker and Shiprocket worker would flip to the same state and race each other. Landed on:
-
-CONFIRMED → COMPILING_PDF ─┬→ PDF_FAILED
-└→ SHIPMENT_QUEUED ─┬→ SHIPMENT_FAILED
-└→ COMPLETED
-
-
-Session `COMPLETED` = courier handoff. Post-handoff state (in-transit, delivered) lives on `Order`, not session. Session and Order don't move in lockstep past this point. Naming: I initially proposed `SHIPMENT_QUEUED → IN_TRANSIT → COMPLETED`; Guts preferred the two-state version because it cleanly maps "session's responsibility ends at handoff, Order carries the rest." Went with Guts's shape.
-
-**PDF page dimensions match source image dimensions exactly.** No hardcoded book size. Portrait/landscape auto-detected per comic via `Page.artworkWidth`/`artworkHeight`. Aligns with the client's confirmed 8×11 or 11×8 print sizes since the source images already carry those aspect ratios.
-
-**PDF stored in R2 public bucket at `pdfs/{sessionId}.pdf`.** Guts flagged mid-session that customers should be able to re-download later. Switched from signed URLs (private bucket, 7-day expiry) to public bucket (UUID key = unguessable, no expiry, permanent re-download). `Order.pdfDownloadExpiry` schema field kept but always null in case client reverses.
-
-**PNG → JPEG@85% conversion before pdf-lib embedding.** Combined with a Cloud Run RAM bump to 2 GB, this brings peak worker memory from ~625 MB (5 concurrent × 125 MB PDFs) into a comfortable 2 GB envelope while shrinking final PDF from ~120 MB to ~30 MB. Composite over white handles any transparency (belt-and-suspenders — comic art is opaque). Guts initially thought "pay for quality" meant keeping PNG; clarified that at print quality PNG-vs-JPEG@85 is indistinguishable and JPEG only saves bandwidth. Went with JPEG.
-
-**Shiprocket enqueue inline at end of PDF worker's happy path.** Not via BullMQ `on-complete` event. Explicit control flow, cleaner error boundaries, matches the pattern used by the Razorpay webhook enqueueing `enqueuePaidGenerationJobs`.
-
-**PDF worker failure handler waits for all retries.** Guard: `if (!job || job.attemptsMade < (job.opts.attempts ?? 3)) return;`. BullMQ fires `failed` on every retry, not just the last one. Without the guard, `PDF_FAILED` would get set on the first transient blip and recoverable jobs would be marked terminal.
+**Blog slugs are frozen after create**, body stored unsanitized with sanitizing owned by the frontend at render time.
 
 ### Work done
 
-**Bug fixes (5 closed, 2 deferred):**
+**Backend fixes:** `teamMember.service.ts` (old≠new guard, widened `data` signature), `teamMember.schema.ts` (five fields `.nullable()`). Guts applied both, I verified.
 
-- **Bug 1 — paid session 24h expiry:** exported `POST_PAYMENT_STATUSES` from `session.service.ts` (was local to `regeneratePage`), added new `EXPIRY_EXEMPT_STATUSES` = union of `POST_PAYMENT_STATUSES` + `AWAITING_PAYMENT`, added early-return in both `assertNotExpired` copies, added exclusion to sweeper's `notIn`, fixed `isExpired` computation in `getOrderSessionId`, deleted the old duplicate `POST_PAYMENT_STATUSES` from near `regeneratePage`. Also imported `EXPIRY_EXEMPT_STATUSES` into `checkout.service.ts` (kept the duplicated `assertNotExpired` per prior decision — third caller hasn't appeared, so no refactor).
-- **Bug 2 — `coverImageUrl`:** two-line fix in `order.service.ts`, `coverImageUrl` → `coverThumbnailUrls` in both `listUserOrders` and `getUserOrder`. Response shape now returns the array; frontend picks display index. Verified schema field name via grep first — Guts's initial correction attempt used `coverImageUrls` (plural, still wrong) and I caught it in the verify pass.
-- **Bug 3 — stranded PAID:** two edits in `webhook.service.ts`. First edit refined the idempotency early-return so it lets a retry through when Order is PAID but Session is still PAID/AWAITING_PAYMENT. Second edit replaced the misleading try/catch around `enqueuePaidGenerationJobs` with a `.catch` that deletes the `WebhookEvent` row then re-throws. Confirmed the controller (`webhook.controller.ts`) and error handler (`errorHandler.ts`) both correctly translate the throw to a 500 — no controller-side changes needed.
-- **Bug 4 — `checkoutParamsSchema`:** wired the existing (previously unused) Zod schema into `checkout.controller.ts` via `safeParse` + `ValidationError`. Replaced the inline `typeof === "string"` check.
-- **Bug 6 — post-payment PATCH lock:** added the 12-field lock block in `updateOrderSession` after `assertNotExpired`, before the `data` assembly. Uses `POST_PAYMENT_STATUSES` (already exported from Bug 1). Field-by-field rejection so a PATCH containing only `notificationEmail` still succeeds post-payment.
+**Schema:** three models + `FaqPlacement` enum added to `schema.prisma` by Guts, reviewed by me, migrated as `20260823212030_add_how_it_works_faq_blog`. Purely additive — `CREATE TYPE` + 3 `CREATE TABLE` + 3 indexes, zero `ALTER`.
 
-**Bugs deliberately deferred:**
-- **Bug 5 (rate limiting)** — Guts explicitly wants to batch this with other rate-limiting work in feature #9.
-- **Bug 7 (Country toggle)** — batched into feature #7 admin catalog work. India is the only active country in DB, nothing breaks until international rollout.
+**New modules (9 new files, 2 edited):** `howItWorks.{schema,service,controller}.ts`, `faq.{schema,service,controller}.ts`, `blog.{schema,service,controller}.ts`, plus routes in `admin.ts` and `public.ts`.
 
-**Feature #1 — `maybeMarkPaidReady`:**
+**Docs:** `REVIEWS_TEAM_FEEDBACK_API.md` (755 lines) and `HOWITWORKS_FAQ_BLOG_API.md` (755 lines) — frontend handoffs for all six CMS modules.
 
-New function in `session.service.ts` at end of file (~90 lines). Mirror of `maybeMarkPreviewComplete` scoped to `isPreviewPage: false`. Counts terminal `PageVersion` rows for paid pages, reduces into `terminalPageIds`/`succeededPageIds` sets, decides success-vs-failure with success-wins semantics. Two DB flips inside one `$transaction`: session `GENERATING_PAID → PAID_PAGES_READY` (status-guarded) + Order `PAID → GENERATED` (status-guarded, only on success branch). On all-page-failure, Order stays at `PAID` deliberately — refund is an ops decision, not automatic.
+### Tasks added
 
-New WebSocket helper `emitSessionPaidReady` in `src/websocket/event.ts` — mirror of `emitSessionPreviewReady`, emits `session:paid-ready` event.
-
-Wired into `generationWorker.ts` at both existing `maybeMarkPreviewComplete` call sites (success path around line 541, failure path around line 645). Both helpers now fire on every page completion; whichever's `isPreviewPage` filter doesn't match the finished page returns `not-done` and no-ops. Success path emits `session:paid-ready` when `paidResult === "ready"`. Failure path handles the edge case where the last page fails but earlier pages already covered the total. `notifyUser` call left as TODO comment in both paths — notification layer doesn't exist yet.
-
-**Feature #2 — Send-to-print endpoint:**
-
-Four files touched:
-
-- **New:** `src/validators/sendToPrint.schema.ts` — Zod params + body schemas. Body validates: array non-empty, integer types, no duplicate pageNumbers (via `.refine`). Exports `SendToPrintInput` type.
-- **`session.service.ts`** — new `sendToPrint` function at end of file (~140 lines). Two new imports: `pdfCompilationQueue` from queues, `SendToPrintInput` type from validator. Full flow: fetch session with order + comic → ownership check → idempotent branch (if already `CONFIRMED`, re-enqueue PDF job and return) → status guard `PAID_PAGES_READY` → selection count matches `pageCount` → in-flight variant check (single `findFirst` for any non-terminal PageVersion) → bulk PageVersion fetch + `versionMap` lookup (avoids N+1) → per-selection existence + `SD_READY` check → transaction (mark `isSelected: true` on chosen variants, flip session, flip Order, throws inside `$transaction` on any `count === 0` guard failure) → enqueue PDF outside transaction with `jobId: sessionId`.
-- **`session.controller.ts`** — new `sendToPrintHandler` at end. Two imports added. Inline `safeParse` for both params and body (mirrors `regeneratePageHandler` pattern). Pulls `userId` from `req.user!.id` (safe because `/api/user/*` is behind `requireLoggedIn` globally per app.ts).
-- **`src/routes/user.ts`** — new route registered: `POST /sessions/:sessionId/send-to-print`.
-
-Route path in `user.ts` (behind auth) chosen over `public.ts` — customer must own the session, and by `PAID_PAGES_READY` the userId is always attached.
-
-**Feature #3 — PDF compilation:**
-
-Schema migration first: added `PDF_FAILED`, `SHIPMENT_QUEUED`, `SHIPMENT_FAILED` to `OrderSessionStatus` enum. Removed `DISPATCHED` (no rows had this status, confirmed by SQL check pre-migration). Migration ran clean. `npm install pdf-lib` — `sharp` already present.
-
-Six files touched:
-
-- **`src/jobs/queues.ts`** — added `shiprocketQueue` mirroring `pdfCompilationQueue` shape.
-- **New:** `src/jobs/workers/shiprocketWorker.ts` — STUB worker (~50 lines). Consumes `shiprocket` queue, flips session `SHIPMENT_QUEUED → COMPLETED` via `updateMany` with status guard, logs and returns. Feature #4 replaces the body.
-- **`src/jobs/workers/index.ts`** — imported and registered `shiprocketWorker` in the workers array. Boot log now says "All 3 workers are actively listening" (was 2).
-- **`session.service.ts`** — new `compilePdfForSession` function at end of file (~180 lines). Also added five new imports at top: `PDFDocument` from pdf-lib, `sharp`, `downloadFileToBuffer`/`getKeyFromPublicUrl`/`uploadFile`/`getPublicUrl` from r2, `shiprocketQueue` from queues. Function flow: fetch session + order + comic → idempotent branch (if already past `COMPILING_PDF`, return existing URLs) → status flip `CONFIRMED → COMPILING_PDF` (guarded on `CONFIRMED` OR `COMPILING_PDF` so a mid-crash retry also passes) → fetch selected PageVersions ordered by pageNumber → for each: `getKeyFromPublicUrl` to convert stored URL back to key → `downloadFileToBuffer` from R2 public bucket → sharp flatten-over-white + JPEG@85 → embed into pdf-lib at source dimensions → save PDF bytes → upload to R2 public bucket at `pdfs/{sessionId}.pdf` → transaction (update Order pdfUrl+pdfDownloadUrl, flip session `COMPILING_PDF → SHIPMENT_QUEUED`) → enqueue shiprocket outside transaction with `jobId: sessionId`.
-- **`src/jobs/workers/pdfWorker.ts`** — full rewrite replacing the 500ms stub. Thin wrapper calling `compilePdfForSession`. Terminal-failure handler with the `job.attemptsMade < job.opts.attempts` guard; only flips session to `PDF_FAILED` after all retries exhausted, with status guard on `COMPILING_PDF` so a late-arriving success doesn't get overwritten.
-- **`src/websocket/event.ts`** — noted from Feature #1: `emitSessionPaidReady` added in that feature, no additional websocket work needed here.
-
-### Tasks added to backlog
-
-Recorded in `CURRENT_STATE.md` under NEXT / OPEN QUESTIONS / VERIFY:
-
-- **Feature #4 (real Shiprocket)** — next priority, replaces the stub. Must flip Order.status (stub doesn't touch it).
-- **Feature #11 (end-to-end payment test)** — moved after #4 so the full pipeline is real when tested.
-- **Feature #5 (`notifyUser`)** — three TODO comment sites in the code now (generationWorker success, generationWorker failure-with-earlier-success, PDF compile — implicit).
-- **Admin retry endpoint for PDF_FAILED and SHIPMENT_FAILED sessions** — how does admin re-trigger? Not designed. Deferred to admin batch (#6 or #7).
-- **Cloud Run RAM bump to 2 GB** — agreed but not applied. Must land before production traffic hits `compilePdfForSession`.
-- **`Order.pdfDownloadExpiry` field always null now** — kept for schema stability in case client reverses the public-bucket decision.
-- **Full VERIFY list rebuilt around the new post-payment pipeline** — 15 items covering payment flow, send-to-print edge cases, PDF compile, stub Shiprocket handoff, and both bug regressions.
+- Apidog pass on all 20 new endpoints — nothing beyond typecheck and unauthenticated smoke tests has run.
+- Decide whether the How It Works section needs an editable headline (`title`/`subtitle` columns — cheap now, migration later).
+- Decide whether Hindi blog content is planned; slugs currently strip all non-Latin characters and fall back to `post`.
+- Blog `tags` are not deduplicated — one-line `.transform` if wanted.
+- The stale `FRONTEND_HANDOFF.md` needs rewriting or deleting.
 
 ### Mistakes caught mid-session
 
-- **Initial Bug 3 fix proposal was wrong.** First recommendation was to add `PAID` to `REGENERATABLE_STATUSES` — one-line fix. Walking through it caught two problems: (1) `regeneratePage` has special code to unstick `FAILED` sessions but no equivalent for `PAID`, so the first regen would leave session stuck at `PAID`; (2) `regeneratePage` is per-page and 14 stranded paid pages meant 14 clicks. Terrible UX for a customer who just paid. Pivoted to Razorpay-retry approach before writing any code. This is the same class of mistake as the Aug 15 session's audit-of-audit finding — a "one-line fix" that would have compounded with an existing constraint.
-- **Initial send-to-print design assumed customer wouldn't re-review preview variants.** Proposed Option B (auto-select preview variants server-side, frontend only sends paid pages). Guts clarified UX: after payment, customer lands back on the same review screen and can regenerate preview variants until they hit Send-to-print. Option A (all pages required in the request) is the correct shape. Pivoted before writing code.
-- **First controller edit for Bug 4 would have used raw `.parse()`.** Caught the DECISIONS "never raw parse in a controller" rule mid-write and switched to `safeParse` + `ValidationError`.
-- **PDF worker Step 3-c success-path had preview and paid `if` blocks in wrong order.** I placed the paid-block between the preview-call and the preview-if-check. Functionally correct (both checks fire) but reads confusingly. Guts caught in verification pass, order fixed to preview → preview-if → paid → paid-if.
-- **Guts typo'd `coverImageUrls` (plural) when applying Bug 2 fix** — I caught it in the verify pass. Schema field is `coverThumbnailUrls` (Thumbnail, not Image). This is exactly the failure mode audit 12.1 predicts: no typecheck runs, so a field-name typo ships if nobody re-verifies. Reinforces the case for `tsc --noEmit` in CI.
-- **Cluster of small missing-import errors during PDF worker wiring** — `maybeMarkPaidReady` import forgotten in generationWorker on first pass (caught by Guts's TypeScript errors on lines 555 and 695); `getSignedUploadUrl` accidentally added to session.service imports even though not used by new code (harmless, left alone). Every missing-import was caught by the typecheck-before-boot policy — the exact reason we run it.
+- **I specified `z.coerce.boolean()` in my own Blog plan.** Caught it while implementing: `Boolean("false")` is `true`, so `?isActive=false` would have returned published posts when asked for drafts — silently wrong, and no typecheck would catch it. Replaced with an enum + transform.
+- **Twice I saw a `500` and nearly attributed it to the code I had just written.** Both times it was the first DB query in a freshly started process failing with an empty `ErrorEvent` from the Neon serverless WS adapter. Proved it by calling the service function directly (worked), then re-hitting the endpoint warm (worked). The first time I wrongly blamed a `tsx watch` reload race; the second investigation produced the better explanation and corrected the first.
+- **Started a dev server without checking whether one was already running** — got `EADDRINUSE` on 8080. Tested against the existing one instead, which was the right call anyway.
+- **Left a claim in an early analysis that both order endpoints were broken**, taken from `PROJECT_CONTEXT.md` rather than the code. Checked `order.service.ts` directly and found it already fixed. The doc was stale, not the code — corrected in the same message.
 
 ### What is explicitly not done
 
-Nothing built this session has been runtime-verified. All work was typecheck + boot verification only, by policy. First real verification will happen after feature #4 lands so the pipeline is real end-to-end, not stub-terminated.
-
-Every specific verification target from Aug 19 still stands: real Razorpay test payment, duplicate webhook (P2002 path), wrong signature returns 400, idempotent checkout re-call, delayed webhook (>30s), payment.failed logging. Now added: send-to-print in-flight rejection, send-to-print idempotent retry, PDF worker retry-then-fail behavior, stub Shiprocket flip.
-
-Cloud Run RAM bump to 2 GB is agreed but not applied. Cloud Run "CPU always allocated" for the sweeper is still unverified from before the session.
-
-**Session ended at a clean stopping point** — three features shipped, five bugs closed, nothing half-done. Feature #4 (real Shiprocket) picks up next session.
+None of the 20 new endpoints has been exercised with an admin session. The team-member bug fix has not been runtime-verified either — the repro (`PATCH` with an unchanged `imageKey`, then reload the image) needs Apidog plus an R2 check. Everything from the Aug 22 not-done list still stands: the paid half of the pipeline has never run, and no real payment has completed end to end.
 
 ---
 
-## Session — August 19, 2026 — Checkout, Razorpay, customer order endpoints; then a doc sync that found three defects
+## Session — August 22, 2026 — Production deployment + three payment-path bugs, one of them found in live logs
 
-**Triggered by:** the P1 list was done and feature work had been paused since August 11. Guts picked up the `NEXT` list at item 1 and worked through checkout → Razorpay → user-facing order fetch in a single day. Roughly 2.5 days of the 10-day plan closed. The doc sync ran afterwards as a separate task and is where the defects surfaced.
+**Triggered by:** Guts opened with "analyze both folders" and no specific task. It became three connected phases: (1) confirm the backend was ready for the frontend to open the Razorpay modal, (2) go live on Render + Vercel, (3) debug why the webhook wasn't working in production. First session where a bug was diagnosed from real production logs rather than by reading code.
 
-**Two distinct phases, worth keeping separate:** the build phase produced working, boot-verified code and a written session report (`Session_2026 _08 _19_checkout_payments.md`). The sync phase read that report against the actual source and found three things the report asserts that the code does not do.
+### Phase 1 — Readiness check, and the first bug
+
+Question was narrow: is the backend complete for *open modal → pay → watch paid pages generate*? Answer was yes, with one blocker.
+
+**The checkout re-call dead end.** `initiateCheckout` validated status (`PREVIEW_READY`) *before* checking for an existing `Order` — but the function itself flips the session to `AWAITING_PAYMENT`. So on any second call the status guard rejected first and the reuse branch was unreachable dead code. Anyone who closed the Razorpay modal without paying was 409'd forever, and the Aug 21 post-payment field lock also froze `coverType`, so they couldn't restart either.
+
+Guts asked for the reasoning before the fix, twice, and specifically asked whether removing the `@unique` on `Order.orderSessionId` would help — it wouldn't, and working through *why* was useful: `OrderSession.status` is the payment state machine and has exactly one slot, so two live orders per session is structurally impossible regardless of the constraint. Fixed by hoisting the Order check above the status guard.
+
+### Phase 2 — Production deployment
+
+Backend → Render, frontend → Vercel, both on subdomains of `unilakekids.com`. Guts had already bought the domain and mapped both before asking for the checklist, which made the cookie strategy question moot in the best way — same registrable domain means first-party cookies and no Brave/Safari problem.
+
+Two things caught during the sweep that would have broken login silently:
+
+- **Better Auth prefixes its cookie with `__Secure-` when `baseURL` is https.** Verified in `node_modules/better-auth/dist/cookies/index.mjs` rather than assumed. The frontend's `proxy.ts` hardcoded the unprefixed name, so every protected route would have bounced a logged-in user to `/login`.
+- **`next.config.ts` fallback still pointed at the dead Cloud Run URL**, so a missing env var at build time would have silently proxied auth to a stale service.
+
+`documents/production.md` was rewritten from a three-line stub into an 11-step runbook with real domains, a symptom→cause troubleshooting table, and a note that `NEXT_PUBLIC_*` is baked at build time so Vercel needs a redeploy, not a restart.
+
+### Phase 3 — Two bugs found in production
+
+**The expiry bug.** Guts hit "session expired" clicking Pay on a session that was minutes old. The `checkout.service.ts` private copy of `assertNotExpired` was missing one line — `if (session.expiresAt >= new Date()) return;` — so it never checked expiry at all and flipped *every* non-exempt session to `FAILED`. The proof was in the sequence: the address PATCH seconds earlier went through `session.service.ts`'s correct copy and passed. Two functions with the same name, checking different things, on the same session, seconds apart.
+
+Fixed by deletion rather than by patching the missing line. `PROJECT_CONTEXT.md` had recorded the duplication as deliberate — *"leave until a third caller appears"* — which optimised for the wrong risk: the copies drifted long before a third caller showed up, and nothing typechecks divergent copies against each other.
+
+**The webhook dedupe collision.** Payment succeeded, session stuck at `AWAITING_PAYMENT`. Predicted from the code and the "15 events" subscription in the Razorpay dashboard, then confirmed exactly from Render logs:
+
+```
+payment.authorized → eventId pay_TSrandEpXquomL → "Razorpay webhook event ignored"
+payment.captured   → eventId pay_TSrandEpXquomL → "Duplicate ... skipping"
+order.paid         → eventId pay_TSrandEpXquomL → "Duplicate ... skipping"
+```
+
+`WebhookEvent.eventId` was the Razorpay *payment* id, but all three event types carry the same one. `payment.authorized` arrived 671 ms first, claimed the unique key, and `payment.captured` — the only state-changing event — was discarded. The logs also ruled out everything else: 200s in 22–39 ms, no signature failures, service awake. The fix was already sitting in the request headers as `x-razorpay-event-id`, unique per event and stable across retries.
 
 ### Decisions locked
 
-**Payment flow shape.** After payment the paid pages generate in the background — the user is never held on a spinner. The frontend shows a "your comic is being made" prompt with an optional link through to the live preview screen; an email (later WhatsApp) fires when generation finishes.
+Full detail in `DECISIONS.md` under the Aug 22 entries. The load-bearing ones:
 
-**Selection is a single batch commit.** This was the meaningful design call of the session. A per-page `PATCH .../select` endpoint was considered and then eliminated: the user browses variants with zero API calls, and every selection lands at once at send-to-print as `{ selections: [{ pageId, variantIndex }] }` in one transaction across all pages. `isSelected` therefore stays `false` on every variant until that single explicit action. Every page must carry a selection, enforced in the UI and again at the endpoint.
+**Webhook idempotency keys on `x-razorpay-event-id`, never the payment id.** Fallback is `` `${eventType}:${entityId}` `` so the collision can't return if the header is ever absent.
 
-**Order lifecycle rewritten.** `OrderStatus` went from 5 loosely-defined values to 9 that trace the actual flow. `GENERATING` collapsed into `PAID`, `PDF_READY` folded into `CONFIRMED`, `DISPATCHED` became `SHIPPED`, `FAILED` was dropped as never-reached, and `REFUNDED` was dropped with the no-refund policy. The migration was free — no `Order` rows existed.
+**`assertNotExpired` has exactly one copy, exported from `session.service.ts`.** Duplication-by-convention is now an explicit never-do.
 
-**Customer-facing status is derived, never stored.** `toPublicStatus()` collapses 9 internal values into 7 strings; `CONFIRMED`, `SHIPROCKET_FAILED` and `READY_TO_SHIP` all read as `"Printing"` because a Shiprocket failure is an ops problem and not something to alarm a customer with. Renaming a stage is one line and no migration.
+**The existing-Order check sits above the status guard in `initiateCheckout`**, which makes the invariant structural: no Order row ⇒ the session must still be `PREVIEW_READY`.
 
-**Order row created at checkout initiation, not at payment success.** An abandoned checkout leaves a cheap, filterable `CREATED` row and is the natural anchor for a future resume-payment flow.
+**Checkout retries return the `Order`'s snapshotted amount**, never a fresh `PricingRule` lookup — a repriced amount disagrees with the Razorpay order and the gateway rejects it.
 
-**Webhook-only, no client-side verify endpoint.** `payment.captured` is the sole trigger; `payment.failed` logs for support; `order.paid` is ignored as redundant. Accepted cost is a brief delay while the webhook lands. Two systems confirming the same payment is the same duplication already rejected for RunPod webhooks-vs-polling. ~2 h to add later if it becomes a measured UX problem.
-
-**Currency-agnostic from day one, only India seeded active.** `toSmallestUnit(amount, currency)` handles 0-, 2- and 3-decimal ISO currencies; there is no `× 100` anywhere. Enabling international once Razorpay approves the client's account is an admin DB row, not a deploy.
-
-**Country matching is deliberately not enforced.** IP defaulting is the frontend's job. A US user can pick INR pricing and pay the Indian price with a US card — accepted knowingly, because volume is low and blocking it would break gift shipping.
-
-**No expiry after payment; no refunds; session read-only after send-to-print.** The first of these turned out not to be implemented — see below. **(Fixed Aug 21 — Bug 1.)**
-
-**PDF synchronous, Shiprocket asynchronous.** PDF compilation must succeed at send-to-print or the button errors and the user retries. Shiprocket order creation is a retried background job; exhausting retries sets `SHIPROCKET_FAILED` for an admin queue. AWB and manifest stay manual because they need physical weight and dimensions. **(PDF-synchronous decision was reversed Aug 21 — PDF is now an async background job on the `pdf-compilation` BullMQ queue with BullMQ retries. Reason: synchronous held the request open for the full ~60s+ compilation and made retries a customer-facing button rather than backend automation.)**
-
-**All notification behind `notifyUser(orderId, event)` from day one** — email now, WhatsApp as a one-file addition later, both on retried jobs so neither blocks a response.
+**Hosting is subdomains of one owned domain, single instance, on a host that doesn't suspend idle instances.** All three are consequences of in-process workers + in-memory WS rooms.
 
 ### Work done
 
-- **`src/lib/razorpay.ts`** — SDK singleton, `toSmallestUnit()` with explicit zero-decimal and three-decimal currency sets, `verifyWebhookSignature()` using `crypto.timingSafeEqual` with a length pre-check and a try/catch so malformed hex returns `false` instead of throwing.
-- **`checkout.service.ts` / `checkout.controller.ts` / route** — six guards, country + `PricingRule` lookup, Razorpay order created outside the transaction, `Order` row + session flip inside one, idempotent reuse of a `CREATED` order, `updateMany` status guards on the flip. Orphaned Razorpay orders after a DB failure are logged and left to Razorpay's 15-minute auto-expiry.
-- **`webhook.service.ts` / `webhook.controller.ts` / `routes/webhooks.ts`** — signature check, `WebhookEvent` insert for transport-level idempotency, order-status check for business-level idempotency, `payment.captured` handling, best-effort `orderId` backfill, transactional `PAID` flips, enqueue outside the transaction, then `GENERATING_PAID`.
-- **`app.ts`** — `/api/webhooks` mounted with `express.raw({ type: "application/json" })` above `express.json()`, the same raw-body pattern Better Auth already needed.
-- **`enqueuePaidGenerationJobs`** in `session.service.ts` — a faithful mirror of the preview enqueue with `isPreviewPage: false`, exported for the webhook.
-- **`order.service.ts` / `order.controller.ts` / user routes** — `GET /orders` and `GET /orders/:id`, ownership-checked, curated shapes, `publicStatus` instead of raw status.
-- **`orderStatusMapping.ts`**, **`checkout.schema.ts`**, three Razorpay env vars, and the `deleteAddressHandler` envelope fix (address bug #3).
+**Backend:** `checkout.service.ts` (guard reorder, null-`razorpayOrderId` guard, self-heal flip, `assertNotExpired` import), `session.service.ts` (exported `assertNotExpired`), `webhook.controller.ts` + `webhook.service.ts` (event-id header), `schema.prisma` (corrected `eventId` comment — no migration), `app.ts` + `auth.ts` (production origins, cross-subdomain cookies — applied by Guts).
 
-### Bugs hit and fixed mid-build
+**Frontend (separate repo):** audited the full checkout implementation Guts had built and found seven issues; fixed the three blocking ones — a `useEffect` feedback loop that turned the 2-second payment poll into a request storm burning 90 seconds of budget in ~5; a relative `fetch()` resolving to the Next server instead of the API, which left Pay Now permanently disabled for first-time users; and `redirect()` inside a `try/catch` that swallowed every `NEXT_REDIRECT` and sent users home. Also `proxy.ts` and `next.config.ts` (applied by Guts).
 
-- **`checkout.service.ts` carried three cascading naming bugs from an earlier draft** — a typo'd `assestNotExpired`, an `assertNotExpired` that actually held the shipping-completeness logic, and a call to a nonexistent `assertShippingComplete`. Fixed by renaming both helpers and correcting the call.
-- **Flat vs nested Razorpay config** — code assumed `config.razorpayKeyId`; the chosen shape was `config.razorpay.razorpayKeyId`. Reverted to nested.
-- **`razorpay.ts` seemed not to log "initialized" on boot** — not a bug. Nothing imported the module yet and ESM only executes imported files. Confirmed with a temporary import in `server.ts`, then removed. Same class of confusion as the Part C `console.log` that never fired back in August.
+**Docs:** `production.md` rewritten twice — first as a URL-change checklist, then as the step-by-step runbook once the domains were mapped. New `frontend/api documentation/CHECKOUT_PAYMENT_API.md` (16 parts) covering checkout → Razorpay → verifying overlay → paid generation → stubbed send-to-print, with a full address-book section added on request.
 
-### Doc sync — three defects the build phase did not catch
+### Tasks added
 
-None of these were in the session report; all three came from reading the source against it. All three were recorded in `CURRENT_STATE.md`. **All five (including two smaller findings) were fixed Aug 21 as Bugs 1–4 and 6.**
+- End-to-end payment verification is now priority 1, ahead of Shiprocket — the fix is deployed but a capture has never completed successfully.
+- Rotate `RAZORPAY_WEBHOOK_SECRET` (exposed in a screenshot this session).
+- Confirm `NODE_ENV=production` on Render and check the live cookie domain shows `.unilakekids.com`.
+- Confirm whether the Render instance is paid — free tier kills the workers and sweeper.
+- Four frontend bugs left open: regeneration cap still shows 3 post-payment, no post-login auto-resume, order summary prices off the browsing country instead of `shippingCountry`, and `isPaid` counts `AWAITING_PAYMENT` as paid.
 
-- **Both order endpoints throw on first call.** `order.service.ts` selects `comic.coverImageUrl` in two places. `Comic` has `coverThumbnailUrls String[]`; there is no `coverImageUrl`. Prisma raises a validation error, so neither endpoint has ever been able to return. The report lists them as done ahead of schedule. **This is the cleanest evidence so far for audit 12.1** — `tsc --noEmit` would have caught it instantly, and the absence of any typecheck is exactly why it shipped. **(Fixed Aug 21 — Bug 2.)**
-- **The locked "no expiry after payment" decision is not implemented, and the gap destroys paid sessions.** `expiresAt` is still 24 h from creation and is never extended at payment, while `sweepExpiredSessions` flips every session past `expiresAt` that is not `FAILED`/`COMPLETED` — `AWAITING_PAYMENT`, `PAID` and `GENERATING_PAID` are all caught. A customer who pays and returns the next day to pick variants finds a `FAILED` session. Confirmed launch-blocking. Note the fix has to land in *both* copies of `assertNotExpired`, since checkout has a private duplicate. **(Fixed Aug 21 — Bug 1, via `EXPIRY_EXEMPT_STATUSES` exclusion in four places.)**
-- **The webhook's stranded-`PAID` recovery path does not exist.** The catch block on a failed paid-page enqueue says "user can retry via a future regenerate call (PAID is regeneratable per DECISIONS)." `PAID` is not in `REGENERATABLE_STATUSES`. The two-step `PAID → GENERATING_PAID` flip is still the right shape; it just has nothing to fall back on. **(Fixed Aug 21 — Bug 3, via Razorpay webhook retry rather than user-driven regenerate.)**
+### Mistakes caught mid-session
 
-Two smaller findings recorded at the same time: **`checkoutParamsSchema` is imported by nothing** (the controller does an inline string check, so no UUID validation runs despite the report saying otherwise) **(Fixed Aug 21 — Bug 4.)**, and **`helmet()` has moved above the Better Auth handler** in `app.ts`, reversing a documented decision so that `/api/auth/*` now does receive helmet headers. The helmet move was never recorded and its intent is unknown, so it is still flagged `⚠️ CONTRADICTORY` in both `PROJECT_CONTEXT.md` and `DECISIONS.md` rather than rewritten either way. **(Helmet contradiction unresolved.)**
+- **First typecheck of `checkout.service.ts` was meaningless.** `tsc` bailed on TS5112 (config present but files named on the command line) before checking anything, and I initially read the empty output as "0 errors." Caught it by re-running with `-p tsconfig.json` and confirming 121 files were actually compiled. Empty output is not the same as a clean pass.
+- **A stray `.` appeared in `CheckoutPage.tsx` between my read and my edit** — the file had changed on disk. The Edit tool's mismatch caught it; re-reading showed a syntax error that would have failed the build. Re-read before editing when a tool reports the file moved under you.
+- **Nearly asserted that Cloudflare was proxying `api.unilakekids.com`** based on `cf-ray` headers in the logs. Render fronts its own infra with Cloudflare, so those headers prove nothing about Guts's zone. Downgraded to "check whether" rather than stating it.
+- **Guts's "webhook verification is not working" framing was wrong and worth correcting.** Verification was working perfectly — 200s, no signature failures. The failure was one layer deeper, in the idempotency gate. Accepting the framing would have sent us hunting the secret.
 
 ### What is explicitly not done
 
-Nothing has been verified against a real Razorpay payment. The only smoke test was a bare curl confirming the webhook route returns 400 on a missing signature header — **the signature verification code has never seen a genuine payload.** ngrok instructions were written but never executed. `maybeMarkPaidReady` does not exist, so a session enqueues its paid pages and then sits at `GENERATING_PAID` forever. Send-to-print and PDF compilation are not built. Address bugs 1 (auto-default race) and 2 (non-atomic delete-then-promote) are documented and deferred. **(`maybeMarkPaidReady`, send-to-print, and PDF compilation all built Aug 21 as features #1, #2, #3. Real payment test still not done — deferred to after feature #4 lands.)**
-
-**The standing recommendation from this session:** spend 1–2 hours on ngrok plus one real test payment *before* layering paid-page and PDF work on top, so a signature bug surfaces while it is still isolated. **(This recommendation was overruled Aug 21 — Guts explicitly decided to defer runtime testing until feature #4 lands so the pipeline is real end-to-end. Accepted risk.)**
+The paid half of the pipeline has still never run: `enqueuePaidGenerationJobs` → worker → RunPod, `maybeMarkPaidReady`, `session:paid-ready` over `wss://` through Cloudflare → Render. Send-to-print, PDF compilation and the stub Shiprocket flip are all unverified. The next session should start by completing one real test payment end to end before building anything new.
 
 ---
 
 ## Older sessions (collapsed)
 
+- **August 21, 2026** — Five-bug sprint + three features shipped. Closed Bugs 1–4 and 6 from Aug 19 (paid-session expiry exemption via `EXPIRY_EXEMPT_STATUSES`; `coverImageUrl` → `coverThumbnailUrls`; stranded-`PAID` fixed by re-throwing so Razorpay retries, deleting the `WebhookEvent` row first; `checkoutParamsSchema` wired; 12-field post-payment PATCH lock). Deferred Bug 5 (rate limiting) and Bug 7 (Country toggle). Built `maybeMarkPaidReady` + `session:paid-ready`, the send-to-print endpoint (all-pages selection, in-flight rejection, idempotent retry), and PDF compilation via pdf-lib with a stub Shiprocket worker. Locked: post-`CONFIRMED` state machine with explicit `PDF_FAILED`/`SHIPMENT_FAILED` branches; PDF pages sized to source images; PDF in the public bucket for permanent re-download; PNG→JPEG@85 before embedding. Nothing runtime-verified — typecheck + boot only, by explicit policy.
+- **August 19, 2026** — Checkout + Razorpay + customer order endpoints built in one day (`razorpay.ts` singleton, `toSmallestUnit`, `verifyWebhookSignature`, `initiateCheckout`, the webhook handler, `enqueuePaidGenerationJobs`, `GET /orders`). Locked: selection is a single batch commit at send-to-print (no per-page select endpoint); `OrderStatus` rewritten to 9 values; customer-facing status derived via `toPublicStatus()`; Order row created at checkout initiation; webhook-only with no client-side verify; currency-agnostic amounts; no refunds; country matching deliberately unenforced. A doc-sync pass afterwards read the source against the session's own report and found three defects it had claimed as done — `coverImageUrl` (nonexistent field) breaking both order endpoints, the "no expiry after payment" decision never implemented, and the stranded-`PAID` recovery path referencing a `REGENERATABLE_STATUSES` entry that didn't exist. All three plus two smaller findings were fixed Aug 21 as Bugs 1–4 and 6. The standing recommendation — do one real ngrok test payment before layering more on top — was overruled that session and, in hindsight, would have caught the Aug 22 webhook dedupe collision three days earlier.
 - **August 15, 2026** — P1 fix verification found two defects in the fixes themselves. `FAILED` sessions couldn't recover because `regeneratePage` never reset session status back to `GENERATING_PREVIEW` — fixed by flipping BEFORE enqueue (the deliberate exception to the flip-after rule). `distinct: ["pageId"]` in the terminal-state query was nondeterministic — could read a FAILED row for a page that succeeded on retry. Fixed by loading all terminal rows and reducing into two Sets. Eight fixes confirmed correct; 1.1 (CI/CD) reported resolved but unverified. Full doc sync across all four docs. `CODE_VS_DOCS_AUDIT.md` frozen at Aug 11.
 - **August 11, 2026** — Full codebase audit against the four docs, then doc sync. No application code changed — documentation work only. Produced `documents/CODE_VS_DOCS_AUDIT.md` — 125 numbered findings (P1 13 / P2 40 / P3 72). Found undocumented features (whole `displayImageUrl`, page reordering, re-entrant preview enqueue, `GET /api/public/countries`, `deleteComic` sweeping page assets). Introduced the `⚠️ CONTRADICTORY (Aug 11 audit)` marker convention. Four loose ends closed by inspection.
 - **August 7, 2026** — Part E complete: full SD worker orchestration + supporting fixes + end-to-end verification against real RunPod. Photo cache with refcount + Promise memoization built. `isPreviewPage: true` filter replaced `pageNumber <= freePreviewPages` throughout. BullMQ priority formula compressed to fit 21-bit ceiling. Session status flip moved to AFTER enqueue succeeds. `hasFace` fork added — non-face pages skip RunPod. `GET /sessions/:id` redesigned to nested `pages[].variants[]`. JPEG q88 for RunPod payload / PNG for R2 storage. BigInt serialization patched globally. Photo endpoint renamed `.../validate` → `.../confirm`.

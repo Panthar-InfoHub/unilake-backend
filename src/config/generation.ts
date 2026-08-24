@@ -23,3 +23,19 @@ export const BUBBLE_BOUND_EPSILON = 0.0001;
 export const DEFAULT_FONT_SIZE = 0.02;
 export const MIN_FONT_SIZE = 0.005;
 export const MAX_FONT_SIZE = 0.25;
+
+// Bubble.fontColor is the fill of the stamped dialogue, stored as a 6-digit hex
+// string and dropped straight into the SVG `fill` by the text stamper.
+//
+// Exactly one canonical form is accepted: "#rrggbb", lowercased on write. No
+// 3-digit shorthand, no 8-digit alpha, no CSS colour names — a single form means
+// the browser's colour input, the DB value and the SVG attribute are the same
+// string everywhere, with no conversion step to get wrong. Transparency, if it
+// is ever wanted, belongs in a separate fill-opacity field rather than in this
+// one (librsvg's 8-digit hex support is unreliable).
+//
+// The pattern accepts either case so a pasted "#FFAA00" is a normalisation
+// concern rather than a validation error; the Zod schema lowercases after this
+// check passes.
+export const DEFAULT_FONT_COLOR = "#000000";
+export const FONT_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;

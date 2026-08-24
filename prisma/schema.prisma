@@ -206,6 +206,7 @@ model Bubble {
   // Rendered size = fontSize * artworkHeight.
   // Default 0.02 ≈ 31px on a 1536px-tall page.
   fontSize Float   @default(0.02)
+  fontColor String @default("#000000")
 
   sortOrder Int @default(0) // order bubbles were added, for predictable rendering/debugging
 
@@ -272,7 +273,7 @@ enum OrderSessionStatus {
   PDF_FAILED
   SHIPMENT_QUEUED
   SHIPMENT_FAILED
-  COMPLETED 
+  COMPLETED
   FAILED
 }
 
@@ -349,10 +350,10 @@ model PageVersion {
   variantIndex Int     @default(0) // 0,1,2... up to 3-4 free / 8 paid
   seed         BigInt? // ComfyUI seed used, stored for reproducibility
 
-  textStampedUrl String? // Sharp output — artwork with text stamped, INPUT to ComfyUI
-  comfyJobId     String? // RunPod job ID for the face-swap job
+  textStampedUrl  String? // Sharp output — artwork with text stamped, INPUT to ComfyUI
+  comfyJobId      String? // RunPod job ID for the face-swap job
   displayImageUrl String? // for storing the display URL that ougth to be displayed in the browser
-  finalImageUrl  String? // ComfyUI output — face-swapped + text-stamped, shown to user & used in PDF
+  finalImageUrl   String? // ComfyUI output — face-swapped + text-stamped, shown to user & used in PDF
 
   isSelected   Boolean           @default(false) // chosen by user at confirm step
   status       PageVersionStatus @default(QUEUED)
@@ -372,15 +373,15 @@ model PageVersion {
 // ============================================================
 
 enum OrderStatus {
-  CREATED             // Order row created, Razorpay order created, awaiting payment
-  PAID                // Payment succeeded, paid-page generation in progress
-  GENERATED           // All paid pages ready, waiting for user to select variants + send-to-print
-  CONFIRMED           // User clicked send-to-print, PDF compiled, Shiprocket queued
-  SHIPROCKET_FAILED   // Shiprocket order creation exhausted retries, admin handles manually
-  READY_TO_SHIP       // Shiprocket order created, admin fills dims + generates AWB
-  SHIPPED             // AWB generated, package handed to courier
-  DELIVERED           // Shiprocket webhook confirmed delivery
-  CANCELLED           // Manual admin cancellation (edge case)
+  CREATED // Order row created, Razorpay order created, awaiting payment
+  PAID // Payment succeeded, paid-page generation in progress
+  GENERATED // All paid pages ready, waiting for user to select variants + send-to-print
+  CONFIRMED // User clicked send-to-print, PDF compiled, Shiprocket queued
+  SHIPROCKET_FAILED // Shiprocket order creation exhausted retries, admin handles manually
+  READY_TO_SHIP // Shiprocket order created, admin fills dims + generates AWB
+  SHIPPED // AWB generated, package handed to courier
+  DELIVERED // Shiprocket webhook confirmed delivery
+  CANCELLED // Manual admin cancellation (edge case)
 }
 
 model Order {
@@ -560,4 +561,71 @@ model Feedback {
   updatedAt DateTime       @updatedAt
 
   @@map("feedbacks")
+}
+
+// ============================================================
+// HOW IT WORKS (homepage explainer — singleton row)
+// ============================================================
+
+model HowItWorks {
+  id        String  @id @default(uuid())
+  videoUrl  String? 
+  posterUrl String? 
+
+  steps Json @default("[]")
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("how_it_works")
+}
+
+// ============================================================
+// FAQ (two independent global sets, split by placement)
+// ============================================================
+
+enum FaqPlacement {
+  HOME
+  COMIC
+}
+
+model Faq {
+  id        String       @id @default(uuid())
+  placement FaqPlacement
+
+  question  String
+  answer    String  @db.Text 
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([placement, sortOrder])
+  @@map("faqs")
+}
+
+// ============================================================
+// BLOG
+// ============================================================
+
+model Blog {
+  id    String @id @default(uuid())
+  slug  String @unique
+  title String
+
+  excerpt       String? @db.Text
+  body          String  @db.Text
+  coverImageUrl String?
+  tags      String[] 
+
+  isActive Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, createdAt])
+  @@map("blogs")
 }

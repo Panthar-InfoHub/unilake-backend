@@ -127,6 +127,42 @@ import {
   updateFeedbackStatusHandler,
 } from "../controllers/feedback.controller.js";
 import { updateFeedbackStatusSchema } from "../validators/feedback.schema.js";
+import {
+  getHowItWorksUploadUrlSchema,
+  updateHowItWorksSchema,
+} from "../validators/howItWorks.schema.js";
+import {
+  getAdminHowItWorksHandler,
+  getHowItWorksUploadUrlHandler,
+  updateHowItWorksHandler,
+} from "../controllers/howItWorks.controller.js";
+import {
+  createFaqSchema,
+  reorderFaqsSchema,
+  updateFaqSchema,
+} from "../validators/faq.schema.js";
+import {
+  createFaqHandler,
+  deleteFaqHandler,
+  getAllFaqsHandler,
+  reorderFaqsHandler,
+  toggleFaqStatusHandler,
+  updateFaqHandler,
+} from "../controllers/faq.controller.js";
+import {
+  createBlogSchema,
+  getBlogUploadUrlSchema,
+  updateBlogSchema,
+} from "../validators/blog.schema.js";
+import {
+  createBlogHandler,
+  deleteBlogHandler,
+  getAdminBlogByIdHandler,
+  getAdminBlogsHandler,
+  getBlogUploadUrlHandler,
+  toggleBlogStatusHandler,
+  updateBlogHandler,
+} from "../controllers/blog.controller.js";
 
 const router = Router();
 
@@ -307,7 +343,50 @@ router.patch(
 router.patch("/team-members/:id/status", toggleTeamMemberStatusHandler);
 router.delete("/team-members/:id", deleteTeamMemberHandler);
 router.get("/team-members", getAllTeamMembersHandler);
-router.get("/team-members/active", getActiveTeamMembersHandler);
+// router.get("/team-members/active", getActiveTeamMembersHandler);
+
+// how it works
+router.get("/how-it-works", getAdminHowItWorksHandler);
+router.post(
+  "/how-it-works/upload-url",
+  validateBody(getHowItWorksUploadUrlSchema),
+  getHowItWorksUploadUrlHandler
+);
+router.patch(
+  "/how-it-works",
+  validateBody(updateHowItWorksSchema),
+  updateHowItWorksHandler
+);
+
+// faqs
+// NOTE: /faqs/reorder MUST stay above /faqs/:id — both are PATCH with the
+// same segment count, so Express matches whichever is registered first.
+router.get("/faqs", getAllFaqsHandler);
+router.post("/faqs", validateBody(createFaqSchema), createFaqHandler);
+router.patch(
+  "/faqs/reorder",
+  validateBody(reorderFaqsSchema),
+  reorderFaqsHandler
+);
+router.patch("/faqs/:id", validateBody(updateFaqSchema), updateFaqHandler);
+router.patch("/faqs/:id/status", toggleFaqStatusHandler);
+router.delete("/faqs/:id", deleteFaqHandler);
+
+// blogs
+// /blogs/upload-url is a POST and /blogs/:id is GET/PATCH/DELETE, so there is
+// no same-method collision here — but keep the literal path above the param
+// one anyway, matching the rest of this file.
+router.post(
+  "/blogs/upload-url",
+  validateBody(getBlogUploadUrlSchema),
+  getBlogUploadUrlHandler
+);
+router.get("/blogs", getAdminBlogsHandler);
+router.get("/blogs/:id", getAdminBlogByIdHandler);
+router.post("/blogs", validateBody(createBlogSchema), createBlogHandler);
+router.patch("/blogs/:id", validateBody(updateBlogSchema), updateBlogHandler);
+router.patch("/blogs/:id/status", toggleBlogStatusHandler);
+router.delete("/blogs/:id", deleteBlogHandler);
 
 // feedback
 router.get("/feedbacks", getAllFeedbacksHandler);

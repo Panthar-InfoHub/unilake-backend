@@ -60,7 +60,7 @@
 - **Absolute-pixel bubble geometry or `fontSize`** — normalized 0–1 fractions only. Pixels are meaningless without a reference resolution and break when artwork is re-uploaded at a different size.
 - **Accepting `artworkWidth` / `artworkHeight` from the client** — always Sharp-probed server-side; a client-supplied value cannot be verified and silently corrupts every bubble on the page.
 - **Dedicated thumbnail add / remove / reorder endpoints** — all four operations ride the full-array `PATCH /comics/:comicId`. Index-based deletion is race-prone with two admins on one screen.
-- **Using `r2.getKeyFromPublicUrl()` outside the SD worker** — it assumes its input is always a URL. Request-body normalization is a separate concern with its own local helper.
+- **Using `r2.getKeyFromPublicUrl()` for request-body normalization** — it assumes its input is always a URL, and a request body may carry either a URL or a bare key. That case keeps its own local helper (`normalizeThumbnailInput`). *(Amended Aug 24: the rule used to say "outside the SD worker," which was too broad. Converting a **stored** `*Url` column back to a key for deletion is exactly what the helper is for, and it now has callers in the SD worker, PDF worker, `howItWorks.service.ts` and `blog.service.ts`.)*
 - **Blocking a publish on anything beyond thumbnails + pricing** — the remaining 9 checks are permanently the frontend's responsibility. Deliberate, not a gap to close later.
 - **Making fonts public to enable `@font-face` preview** — font selection is by name only; the client picks from the per-comic list. Accepted trade-off: no visual overflow check until a printed proof.
 - **Webhook-based RunPod result delivery** — polling was chosen. Adding a webhook route later would create two systems doing the same job.
@@ -110,6 +110,24 @@
 - **(Aug 21) `job.attempts >= max` as a BullMQ "final failure" check.** Use `job.attemptsMade < job.opts.attempts` inside the `failed` handler. BullMQ fires `failed` on every retry, not just the last one; without the guard, PDF_FAILED / SHIPMENT_FAILED gets set prematurely on the first transient failure.
 - **(Aug 21) Silent no-op on a PATCH that touches locked fields.** `updateOrderSession` throws `ConflictError` naming every attempted-but-locked field. Silent acceptance would let the customer think their edit landed and desync the DB from images/Order.
 - **(Aug 21) Comic cover as `coverImageUrl`.** Field is `coverThumbnailUrls: String[]`. Order endpoints return the array; frontend picks the display index. Only permanent field name for comic covers.
+- **(Aug 22) Keying webhook idempotency on the Razorpay PAYMENT id.** One payment emits `payment.authorized`, `order.paid` and `payment.captured`, all carrying the same payment id — whichever lands first claims the unique constraint and `payment.captured` is dropped as a duplicate. Use the `x-razorpay-event-id` header.
+- **(Aug 22) Copying `assertNotExpired` instead of importing it.** The duplicate lost the `expiresAt` comparison and made `initiateCheckout` fail every session as expired. One exported copy in `session.service.ts`; import it.
+- **(Aug 22) Placing the checkout status guard above the existing-Order check.** `initiateCheckout` flips the session itself, so a status-first order makes the reuse branch unreachable and strands anyone who closes the Razorpay modal.
+- **(Aug 22) Recomputing the price from `PricingRule` on a checkout retry.** Return the amount snapshotted on the `Order` — a repriced amount disagrees with the Razorpay order and the gateway rejects it.
+- **(Aug 22) Hosting the frontend and backend on different registrable domains** (`*.vercel.app` + `*.onrender.com`). The session cookie becomes third-party and is blocked by Brave/Safari, and Next middleware never sees it at all. Use subdomains of one owned domain.
+- **(Aug 22) Assuming the Better Auth cookie name is stable across environments.** It gains a `__Secure-` prefix whenever `baseURL` is https. Anything reading it by name must accept both forms.
+- **(Aug 22) Putting `redirect()` inside a `try/catch` in a Next server component.** `redirect()` works by throwing `NEXT_REDIRECT`; the catch swallows it and runs the fallback instead. Scope error handling to the fetch with `.catch()`.
+- **(Aug 22) Reaching the API from the browser with a relative `fetch("/api/...")`.** It resolves against the Next origin, which only proxies `/api/auth/*`. Always go through the axios instance so `baseURL` and the envelope unwrap apply.
+- **(Aug 22) Listing a piece of state in a `useEffect` dependency array when the effect also writes it.** In the verifying-payment overlay this turned a 2-second poll into a request storm that burned the 90-second budget in ~5 seconds. Keep loop counters in closure variables.
+- **(Aug 24) Replacing an R2-backed asset without an `oldUrl !== newUrl` guard.** `updateTeamMember` lacked it, so an edit form resending an unchanged `imageKey` deleted the live photo from R2 while the DB row kept pointing at it — a broken image with no error anywhere. Every asset-replace path must compare before queuing a delete. Now applied in `updateTeamMember`, `updateHowItWorks` (video + poster), and `updateBlog` (cover).
+- **(Aug 24) `.optional()` without `.nullable()` on a field backed by a nullable column.** Makes the field set-once-forever: `null` fails the type check and `""` fails `.min(1)`, so there is no request that clears it. If the column is nullable, the update schema must be `.nullable().optional()`.
+- **(Aug 24) `z.coerce.boolean()` for a query-string boolean.** It runs `Boolean(value)`, and every non-empty string is truthy — so `?isActive=false` coerces to `true` and silently returns the opposite set. Use `z.enum(["true","false"]).transform(v => v === "true")`.
+- **(Aug 24) `.refine((data) => Object.keys(data).length > 0)` as an "at least one field" check.** Passes for `{ field: undefined }`. Use `Object.values(data).some(v => v !== undefined)`. `updateAnnouncementSchema` still has the weak form; the newer schemas do not.
+- **(Aug 24) Sanitizing rich-text HTML only on write.** `Blog.body` is stored raw and sanitized at render with DOMPurify. Write-time-only sanitizing means one bad row already in the database stays dangerous forever.
+- **(Aug 24) A per-comic FAQ relation.** `Faq` has no FK to `Comic`. The `COMIC` placement is one global list rendered identically on every comic page. Adding per-comic questions later is a migration plus new endpoints, not a tweak.
+- **(Aug 24) A `sortOrder`-style step table for How It Works.** Steps are a JSON array on the singleton row; array position is the step number. A steps table would have meant 5 endpoints and a cascade for a list that is always read and written whole.
+- **(Aug 24) Making a blog slug editable.** Generated from the title at create and frozen. `updateBlogSchema` omits it entirely, so a sent `slug` is silently stripped rather than rejected — surface it read-only in the admin UI.
+- **(Aug 24) Trusting a `500` seen immediately after a process start.** The first Prisma query in a fresh process can fail with an empty `ErrorEvent` from the Neon serverless WS adapter; every later query succeeds. Reproduce against a warm connection before debugging the endpoint.
 
 ---
 
@@ -252,7 +270,7 @@
 - **Page artwork + masks are PUBLIC**; fonts, child photos and LoRA stay PRIVATE.
 - **Frontend always sends a `key`, backend stores the resolved URL.**
 - **`thumbnailKeys` accepts either a full public URL or a raw key.**
-- **`normalizeThumbnailInput` is local to `comic.service.ts`.** `r2.getKeyFromPublicUrl` stays reserved for the SD worker (and now the PDF worker, which needs it for the same reason: turning a stored `finalImageUrl` public URL back into a key so `downloadFileToBuffer` can fetch it).
+- **`normalizeThumbnailInput` is local to `comic.service.ts`** — it handles the URL-or-key ambiguity of a request body. **`r2.getKeyFromPublicUrl` is for stored URLs only** (turning a `finalImageUrl` / `imageUrl` / `videoUrl` / `coverImageUrl` column back into a key for download or delete). Callers: SD worker, PDF worker, and — added Aug 24 — `howItWorks.service.ts` and `blog.service.ts`. The older services (`teamMember`, `customerReview`, `page`) still inline the same `.replace(publicBase + "/", "")` by hand; consolidating them is a rainy-day tidy, not a bug.
 - **Page upload keys carry `randomUUID()`**; **font upload keys stay `Date.now()`-only**.
 - **Best-effort R2 cleanup on page update/delete and comic delete.** `deleteComic` also sweeps every page's artwork and mask, since pages cascade-delete in the DB but their R2 objects do not. `Font` and `Country` perform no R2 cleanup on replace or delete.
 - **Delete ordering — DB row first, always:** every deleter across the codebase (`CustomerReview`, `TeamMember`, `HeroImage`, `comic.service`, `page.service`) now follows the same shape: (1) load DB row, (2) run guards, (3) extract R2 keys into local vars, (4) delete DB row, (5) best-effort R2 cleanup in try/catch. A failed DB delete leaves R2 assets intact and the operation retryable. A failed R2 cleanup after DB success just orphans files (wasted storage), never breaks references.
@@ -276,10 +294,24 @@
 - **Better Auth login is via `better-auth/react`'s `createAuthClient`**; `role` is `input: false`.
 - **CORS origin lives in two places** — `app.ts` middleware and Better Auth `trustedOrigins`. Update both or login silently breaks.
 
-**Infra** (unchanged from prior sessions)
-- **(Aug 21) Cloud Run instance tier bumped to 2 GB RAM** — required for PDF worker concurrency 5 × ~120 MB peak per job to fit comfortably alongside Node runtime and other workers. Small monthly cost (~$5–15). Config change agreed but not yet applied; must land before production traffic hits `compilePdfForSession`. See CURRENT_STATE loose ends.
+**Infra**
+- **(Aug 22) Production hosting is Render (backend) + Vercel (frontend), on subdomains of one owned domain.** `api.unilakekids.com` + `www.unilakekids.com`, sharing the registrable domain `unilakekids.com`. This is what makes the Better Auth session cookie first-party. *(Supersedes the Cloud Run hosting decision — the `Dockerfile` is still Cloud Run–shaped, so moving back needs zero URL changes, only platform settings.)*
+- **(Aug 22) Single instance, autoscaling off, permanently.** WebSocket rooms are an in-memory `Map` and the photo cache is per-process; a second instance means half the users never receive live page events. Applies to any host, not just Render.
+- **(Aug 22) A host that suspends idle instances is disqualified.** BullMQ workers and the hourly expiry sweeper run inside the web process. Render's free tier spins down after ~15 min; Cloud Run throttles CPU to ~0 between requests unless CPU is always-allocated. Either one silently stops all background work.
+- **2 GB RAM minimum** — PDF worker concurrency 5 × ~120 MB peak per job, alongside the Node runtime and the other workers.
 
-**CMS** (unchanged from prior sessions)
+**CMS** (prior modules unchanged; three added Aug 24)
+
+*How It Works, FAQ, Blog — added August 24, 2026*
+- **How It Works is a singleton found by `findFirst({ orderBy: { createdAt: "asc" } })`, created on first PATCH.** Find-then-create was chosen over a sentinel-id upsert; the `orderBy` is the mitigation, so that if the narrow double-create race ever fires, every read still deterministically agrees on the same row.
+- **`isActive` is a normal PATCH field on How It Works, not a `/status` toggle** — the one CMS module where it is an idempotent setter rather than a blind flip. Consequence of it being a singleton with one save endpoint.
+- **Public readiness is enforced in the service, not the client** — `isActive && videoUrl && steps.length > 0`, else `null`. Keeps a half-built section off the homepage regardless of when the admin flips `isActive`.
+- **FAQ is one table with a `placement` enum, not two models** — the rows are structurally identical; two models would duplicate controller, service, validator and admin UI for nothing.
+- **FAQ reorder is strict, and infers `placement` from the rows rather than trusting the body.** Requires the complete list for one placement including inactive rows. Chose the strict shape (`reorderComicPages`) over the lenient one (`reorderAnnouncements`, which silently allows a subset to collide with untouched rows).
+- **Blog slug: slugify → append `-2`, `-3` on collision → `|| "post"` when the title strips to empty.** Bounded at 50 attempts. A `P2002` on insert (the concurrent-same-title race) surfaces as a `ConflictError`, not a retry loop.
+- **Blog list endpoints omit `body` via an explicit shared `select`; detail endpoints include it.** The article HTML has no business travelling in a listing payload.
+- **Blog is draft-by-default** (`isActive @default(false)`) — unlike the other CMS models, which default `true`. A post is written over time; a review or team member is created complete in one request. Same reasoning `AnnouncementBar` already used.
+- **One generic `POST /blogs/upload-url` for cover images and in-body editor images** — same MIME types, same bucket, same prefix. A `cover`/`body` discriminator would add structure with no behavioural difference.
 
 **SavedAddress** (unchanged from prior sessions)
 
@@ -326,8 +358,9 @@
 - **The `Order` row is created at checkout initiation, not at payment success.** An abandoned checkout leaves a `CREATED` row that is cheap, filterable, and the natural anchor for a future "resume payment" flow.
 
 **`initiateCheckout` shape**
-- **Guard order:** exists → not expired → `PREVIEW_READY` → has `userId` → has `coverType` → has all seven shipping fields.
-- **Idempotent while `CREATED`:** a repeat call returns the same `razorpayOrderId` rather than creating a second Razorpay order. Any later order status 409s.
+- **Guard order (Aug 22):** exists → not expired → **existing-Order check** → `PREVIEW_READY` → has `userId` → has `coverType` → has all seven shipping fields. *(Superseded: the Order check used to sit last, which made it dead code — see the Aug 22 never-do above.)*
+- **Idempotent while `CREATED`:** a repeat call returns the same `razorpayOrderId` rather than creating a second Razorpay order. Any later order status 409s. The reuse path skips the field guards (already frozen by the post-payment lock) and returns the `Order`'s snapshotted amount. A `CREATED` order with a null `razorpayOrderId` is refused with a 409 instead of returning `undefined` to the client.
+- **(Aug 22) `assertNotExpired` is imported from `session.service.ts`, not duplicated.** The former private copy had silently lost its `expiresAt` comparison and failed every session as expired.
 - **`Country.code` (ISO alpha-2) is the lookup key**, `Country.currencyCode` supplies the currency, and `isInternational` is snapshotted as `code !== "IN"`. Inactive countries are refused.
 - **A missing `PricingRule` logs at `error` and returns 404.** Configuration gap on our side, not user error.
 - **The Razorpay order is created OUTSIDE the transaction; the `Order` row and the `PREVIEW_READY → AWAITING_PAYMENT` flip go INSIDE one.** External system can't participate in Prisma rollback.
@@ -336,7 +369,7 @@
 
 **Razorpay webhook**
 - **`payment.captured` is the sole state-changing event.** `payment.failed` logs error code + description for support and changes nothing. `order.paid` and everything else are logged and ignored.
-- **Idempotency at two layers, deliberately.** Transport layer: `WebhookEvent.eventId @unique` (the payment id, falling back to the order entity id); a `P2002` on insert means a duplicate delivery and returns early. Business layer: `payment.captured` no-ops when the `Order` is already past `CREATED`. **(Aug 21 refinement)** The business-layer check now allows a retry through when the `Order` is `PAID` but the Session is still `PAID` — that shape means the previous webhook attempt flipped the Order but the paid-page enqueue failed. Second webhook attempt re-runs the enqueue. `Order` flip in the transaction is idempotent (`updateMany` with status guard), so re-running it is a safe no-op.
+- **Idempotency at two layers, deliberately.** Transport layer: `WebhookEvent.eventId @unique` — **(Aug 22) the `x-razorpay-event-id` request header**, falling back to `` `${eventType}:${entityId}` ``; a `P2002` on insert means a duplicate delivery and returns early. The header is unique per event and stable across that event's retries, so genuine redelivery still dedupes. *(Superseded: the key used to be the payment id, which collided across the three event types a single payment emits and permanently discarded `payment.captured`.)* Business layer: `payment.captured` no-ops when the `Order` is already past `CREATED`. **(Aug 21 refinement)** The business-layer check now allows a retry through when the `Order` is `PAID` but the Session is still `PAID` — that shape means the previous webhook attempt flipped the Order but the paid-page enqueue failed. Second webhook attempt re-runs the enqueue. `Order` flip in the transaction is idempotent (`updateMany` with status guard), so re-running it is a safe no-op.
 - **(Aug 21) Enqueue failure re-throws; controller returns 500; Razorpay retries.** Before re-throwing, the `WebhookEvent` row is deleted so the P2002 dedupe path doesn't block the retry. This replaces the earlier catch-and-log approach that stranded PAID sessions forever whenever Redis was down. The Order/Session status pair remain the real idempotency anchor; losing the WebhookEvent row on retry is fine.
 - **`WebhookEvent` is written before the payload is dispatched**, so even an ignored event type leaves an audit trail. The `orderId` FK is backfilled afterwards, best-effort, inside a `.catch()`.
 - **`PAID` then `GENERATING_PAID` is a two-step flip on purpose** — the same shape as `triggerGeneration`. Recovery when the second step fails is Razorpay's webhook retry (see above), not user-driven regenerate.

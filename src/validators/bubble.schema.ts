@@ -4,7 +4,21 @@ import {
   DEFAULT_FONT_SIZE,
   MIN_FONT_SIZE,
   MAX_FONT_SIZE,
+  DEFAULT_FONT_COLOR,
+  FONT_COLOR_PATTERN,
 } from "../config/generation.js";
+
+const FONT_COLOR_MESSAGE =
+  'fontColor must be a 6-digit hex colour like "#1a1a1a" — shorthand, alpha and colour names are not accepted';
+
+// Regex FIRST, lowercase SECOND. Validating before transforming means a pasted
+// "#FFAA00" is accepted and normalised rather than reported as malformed, while
+// genuinely bad input still fails against the original string the client sent.
+const fontColorSchema = z
+  .string()
+  .trim()
+  .regex(FONT_COLOR_PATTERN, FONT_COLOR_MESSAGE)
+  .transform((value) => value.toLowerCase());
 
 // Bubble geometry is normalized to 0–1 fractions of the artwork, never pixels.
 // x/y is the top-left corner; the whole rectangle must fit inside the page.
@@ -34,6 +48,9 @@ export const createBubbleSchema = z
       .min(MIN_FONT_SIZE, `fontSize must be at least ${MIN_FONT_SIZE}`)
       .max(MAX_FONT_SIZE, `fontSize cannot exceed ${MAX_FONT_SIZE}`)
       .default(DEFAULT_FONT_SIZE),
+    // Defaulted rather than optional so validateBody hands the service a colour
+    // even when the client omits one — same pattern as fontSize.
+    fontColor: fontColorSchema.default(DEFAULT_FONT_COLOR),
     sortOrder: z.number().int().default(0),
   })
   // x and width are each individually valid but can still overflow together —
@@ -79,6 +96,9 @@ export const updateBubbleSchema = z
       .min(MIN_FONT_SIZE, `fontSize must be at least ${MIN_FONT_SIZE}`)
       .max(MAX_FONT_SIZE, `fontSize cannot exceed ${MAX_FONT_SIZE}`)
       .optional(),
+    // Optional, never nullable: the column is NOT NULL, so "clear the colour"
+    // is not a thing a client can express — it sets #000000 instead.
+    fontColor: fontColorSchema.optional(),
     sortOrder: z.number().int().nonnegative().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {

@@ -16,6 +16,12 @@ import { createFeedbackHandler } from "../controllers/feedback.controller.js";
 import { createFeedbackSchema } from "../validators/feedback.schema.js";
 import { getActiveTeamMembersHandler } from "../controllers/teamMember.controller.js";
 import { getActiveCountriesHandler } from "../controllers/country.controller.js";
+import { getPublicHowItWorksHandler } from "../controllers/howItWorks.controller.js";
+import { getActiveFaqsHandler } from "../controllers/faq.controller.js";
+import {
+  getPublicBlogBySlugHandler,
+  getPublicBlogsHandler,
+} from "../controllers/blog.controller.js";
 const router = Router();
 
 // This will give the public comic
@@ -52,6 +58,19 @@ router.get("/customer-reviews", getActiveCustomerReviewsHandler);
 
 // team meber
 router.get("/team-members", getActiveTeamMembersHandler);
+
+
+// how it works — homepage explainer
+router.get("/how-it-works", getPublicHowItWorksHandler);
+
+
+// faqs — ?placement=HOME|COMIC (required)
+router.get("/faqs", getActiveFaqsHandler);
+
+
+// blogs — published only; detail is looked up by slug, not id
+router.get("/blogs", getPublicBlogsHandler);
+router.get("/blogs/:slug", getPublicBlogBySlugHandler);
 
 
 // countries — active only, for the shipping/pricing country picker

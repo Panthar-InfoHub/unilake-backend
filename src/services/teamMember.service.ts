@@ -61,11 +61,11 @@ export async function updateTeamMember(
   data: {
     name?: string;
     role?: string;
-    description?: string;
-    imageKey?: string;
-    linkedinUrl?: string;
-    instagramUrl?: string;
-    twitterUrl?: string;
+    description?: string | null;
+    imageKey?: string | null;
+    linkedinUrl?: string | null;
+    instagramUrl?: string | null;
+    twitterUrl?: string | null;
   }
 ) {
   const existing = await prisma.teamMember.findUnique({ where: { id } });
@@ -76,6 +76,8 @@ export async function updateTeamMember(
 
   const updateData: Record<string, unknown> = {};
 
+  // `!== undefined`, not a truthiness check, so an explicit null reaches
+  // Prisma and actually clears the column.
   if (data.name !== undefined) updateData.name = data.name;
   if (data.role !== undefined) updateData.role = data.role;
   if (data.description !== undefined) updateData.description = data.description;
@@ -83,14 +85,20 @@ export async function updateTeamMember(
   if (data.instagramUrl !== undefined) updateData.instagramUrl = data.instagramUrl;
   if (data.twitterUrl !== undefined) updateData.twitterUrl = data.twitterUrl;
 
-  // If a new image is being uploaded, convert key to URL
-  // and clean up the old image from R2
+  // Image arrives as an R2 key and is stored as a resolved public URL.
+  // null = remove the photo, a key = replace it, omitted = leave it alone.
+  //
+  // Guard on `oldUrl !== newUrl` so re-submitting the same key does not delete
+  // the file the row still points at. Same guard as updatePage in page.service.ts.
   let oldR2Key: string | null = null;
 
   if (data.imageKey !== undefined) {
-    updateData.imageUrl = getPublicUrl(data.imageKey);
+    const newImageUrl =
+      data.imageKey === null ? null : getPublicUrl(data.imageKey);
 
-    if (existing.imageUrl) {
+    updateData.imageUrl = newImageUrl;
+
+    if (existing.imageUrl && existing.imageUrl !== newImageUrl) {
       const publicBase = config.r2.publicUrlBase.replace(/\/$/, "");
       oldR2Key = existing.imageUrl.replace(`${publicBase}/`, "");
     }
@@ -101,7 +109,8 @@ export async function updateTeamMember(
     data: updateData,
   });
 
-  // Clean up old R2 file after successful DB update
+  // Clean up the replaced/removed file after the DB write succeeds.
+  // Best-effort: a failed delete leaves an orphan file, not a broken row.
   if (oldR2Key) {
     try {
       await deleteFile("public", oldR2Key);
@@ -115,6 +124,7 @@ export async function updateTeamMember(
 
   return updated;
 }
+
 
 
 
