@@ -62,7 +62,7 @@ app.use("/api/webhooks", express.raw({ type: "application/json" }), webhookRoute
 app.use(express.json());
 
 app.get("/health", (req, res) => {
-  res.send("App is working perfectly fine!");
+  res.send("Server is wroking perfectly fine!");
 });
 app.use("/api/admin", requireAdmin, adminRoutes);
 app.use("/api/user", requireLoggedIn, userRouter);

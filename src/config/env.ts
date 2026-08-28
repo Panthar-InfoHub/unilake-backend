@@ -25,6 +25,10 @@ const requriedVariables = [
   "RAZORPAY_KEY_ID",
   "RAZORPAY_KEY_SECRET",
   "RAZORPAY_WEBHOOK_SECRET",
+  "SHIPROCKET_EMAIL",
+  "SHIPROCKET_PASSWORD",
+  "SHIPROCKET_PICKUP_LOCATION_NAME",
+  "SHIPROCKET_WEBHOOK_TOKEN",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -66,5 +70,11 @@ export const config = {
     razorpayKeyId: process.env.RAZORPAY_KEY_ID!,
     razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET!,
     razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET!,
+  },
+  shiprocket: {
+    email: process.env.SHIPROCKET_EMAIL!,
+    password: process.env.SHIPROCKET_PASSWORD!,
+    pickupLocationName: process.env.SHIPROCKET_PICKUP_LOCATION_NAME!,
+    webhookToken: process.env.SHIPROCKET_WEBHOOK_TOKEN!,
   },
 };

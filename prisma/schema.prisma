@@ -199,14 +199,14 @@ model Bubble {
   width  Float
   height Float
 
-  dialogue String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
-  fontId   String?
-  font     Font?   @relation(fields: [fontId], references: [id])
+  dialogue  String  @db.Text // contains tokens: {name}, {pronoun_subject}, {pronoun_object}, {pronoun_possessive}
+  fontId    String?
+  font      Font?   @relation(fields: [fontId], references: [id])
   // Normalized fraction of the artwork's HEIGHT, not pixels.
   // Rendered size = fontSize * artworkHeight.
   // Default 0.02 ≈ 31px on a 1536px-tall page.
-  fontSize Float   @default(0.02)
-  fontColor String @default("#000000")
+  fontSize  Float   @default(0.02)
+  fontColor String  @default("#000000")
 
   sortOrder Int @default(0) // order bubbles were added, for predictable rendering/debugging
 
@@ -414,12 +414,28 @@ model Order {
   pdfDownloadUrl    String? // signed URL, 7-day validity
   pdfDownloadExpiry DateTime?
 
-  shiprocketOrderId String?
-  awbNumber         String?
-  courierName       String?
-  trackingStatus    String?
-  trackingUpdatedAt DateTime?
-  isInternational   Boolean   @default(false)
+  shiprocketOrderId    String?
+  awbNumber            String?
+  courierName          String?
+  trackingStatus       String?
+  trackingUpdatedAt    DateTime?
+  shiprocketShipmentId String?
+  courierId            Int?
+  isInternational      Boolean   @default(false)
+
+  // Real package dimensions (admin-entered at packaging)
+  finalLength  Float?
+  finalBreadth Float?
+  finalHeight  Float?
+  finalWeight  Float?
+
+  // Lifecycle timestamps
+  awbGeneratedAt      DateTime?
+  labelGeneratedAt    DateTime?
+  pickupScheduledDate DateTime?
+  pickupGeneratedAt   DateTime?
+  shippedAt           DateTime?
+  deliveredAt         DateTime?
 
   printVendorOrderId String? // e.g. Gelato order reference
 
@@ -569,8 +585,8 @@ model Feedback {
 
 model HowItWorks {
   id        String  @id @default(uuid())
-  videoUrl  String? 
-  posterUrl String? 
+  videoUrl  String?
+  posterUrl String?
 
   steps Json @default("[]")
 
@@ -596,7 +612,7 @@ model Faq {
   placement FaqPlacement
 
   question  String
-  answer    String  @db.Text 
+  answer    String  @db.Text
   sortOrder Int     @default(0)
   isActive  Boolean @default(true)
 
@@ -616,10 +632,10 @@ model Blog {
   slug  String @unique
   title String
 
-  excerpt       String? @db.Text
-  body          String  @db.Text
+  excerpt       String?  @db.Text
+  body          String   @db.Text
   coverImageUrl String?
-  tags      String[] 
+  tags          String[]
 
   isActive Boolean @default(false)
 
