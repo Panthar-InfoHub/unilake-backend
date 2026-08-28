@@ -128,6 +128,21 @@
 - **(Aug 24) A `sortOrder`-style step table for How It Works.** Steps are a JSON array on the singleton row; array position is the step number. A steps table would have meant 5 endpoints and a cascade for a list that is always read and written whole.
 - **(Aug 24) Making a blog slug editable.** Generated from the title at create and frozen. `updateBlogSchema` omits it entirely, so a sent `slug` is silently stripped rather than rejected — surface it read-only in the admin UI.
 - **(Aug 24) Trusting a `500` seen immediately after a process start.** The first Prisma query in a fresh process can fail with an empty `ErrorEvent` from the Neon serverless WS adapter; every later query succeeds. Reproduce against a warm connection before debugging the endpoint.
+- **(Aug 24 · s2) `@font-face` — embedded, data-URI or otherwise — inside an SVG handed to Sharp.** librsvg resolves fonts through fontconfig and silently discards the rule; the font must be installed on the machine or it does not exist. This cost a production outage where dialogue rendered blank and nobody noticed, because Sharp reports success for unresolvable fonts.
+- **(Aug 24 · s2) SVG `<text>` for page rendering at all.** Text is converted to `<path>` outlines with opentype.js. Anything that depends on host-installed fonts is environment-dependent by construction.
+- **(Aug 24 · s2) Installing fonts into the Docker image to "fix" text rendering.** That treats the symptom and re-introduces host dependence. Outlines need no fonts anywhere; do not add `fonts-*` packages or `FONTCONFIG_PATH`.
+- **(Aug 24 · s2) A fallback font for a bubble with no font assigned.** Throws instead. Falling back is the exact behaviour that hid the outage, and in the production container there is no system font to fall back to anyway.
+- **(Aug 24 · s2) WOFF2 for page rendering.** opentype.js cannot decompress it (no Brotli). `getFontUploadUrlSchema` still accepts the extension, so the failure currently surfaces at generation, not upload.
+- **(Aug 24 · s2) Assuming a font contains glyphs for the text it stamps.** `.notdef` renders as blank or tofu, silently. Checked per character with `charToGlyphIndex(char) === 0` and thrown as a named error listing the offending characters.
+- **(Aug 24 · s2) Judging "does the text fit" on height alone.** The old loop only compared total height, so a single unbreakable word — a long child's name — spilled out of the bubble at full size. Width is now checked against measured advance widths every iteration.
+- **(Aug 24 · s2) 3-digit hex, 8-digit alpha hex, or CSS colour names for `Bubble.fontColor`.** Exactly `#rrggbb`, lowercased on write. One canonical form means the browser colour input, the stored value and the SVG `fill` are the same string with no conversion anywhere. Transparency, if ever wanted, is a separate `fill-opacity` field — not 8-digit hex, which librsvg handles unreliably.
+- **(Aug 24 · s2) Server-side rejection of a low-contrast bubble colour.** The API accepts any valid hex. The server cannot see the artwork behind a bubble, so a hard rule is guesswork wearing the authority of a 400; the admin panel warns and the person looking at the page decides.
+- **(Aug 24 · s2) A `fontWeight` column.** A font file holds exactly one weight — "bold" is a second `Font` row the admin uploads and selects, which already works. Synthetic bold (stroke-thickening) is visibly fake at print resolution and was deferred, not adopted.
+- **(Aug 24 · s2) Per-comic or per-page default colours, or a bulk-apply endpoint.** Colour is set per bubble. Considered and cut.
+- **(Aug 24 · s2) Running BullMQ against a Redis billed per command.** Three idle workers at `drainDelay: 5s` + `stalledInterval: 30s` cost ~60,000 commands/day with an empty queue and exhausted Upstash's 500k/month free tier in about eight days. **Resolved by moving to Redis Cloud, which bills by memory — Upstash is no longer in use.** The rule stands for any future provider choice: BullMQ's polling model is incompatible with per-command pricing.
+- **(Aug 24 · s2) Changing an env var locally without changing it on Render.** After `REDIS_URL` was pointed at Redis Cloud in `.env`, Render kept the dead Upstash URL and production stayed broken while local worked perfectly — which reads as "the fix didn't work" rather than "the fix wasn't deployed." Every env-var change is two changes.
+- **(Aug 24 · s2) Treating a green `/health` as evidence the system is working.** `/health` only exercises Express. During the Redis outage it returned 200 throughout while every queue was dead.
+- **(Aug 24 · s2) A JSX comment (`{/* … */}`) between a ternary's `? (` and its element.** It parses as an object literal, not a comment, and breaks the file. Put the comment above the ternary.
 
 ---
 
@@ -183,8 +198,8 @@
 - **`Page.pagePrompt` is required in Zod (create + update), nullable in DB** — enforced at API boundary, not schema level.
 - **Dialogue token contract mirrored between frontend and backend** — four tokens `{name}`, `{pronoun_subject}`, `{pronoun_object}`, `{pronoun_possessive}`. Unknown tokens render literally in the final image.
 - **Pronoun table (backend source of truth):** `HE → {subject: he, object: him, possessive: his}`; `SHE → {she, her, her}`; `THEY → {they, them, their}`. Located in `src/jobs/workers/sd/tokens.ts`.
-- **Sharp text stamping design:** SVG-per-bubble with `text-anchor: middle`; font embedded as base64 `@font-face` data URI (fonts in private R2 bucket, no accessible URL); multi-line rendering via `<tspan>` with `dy`; auto-shrink loop decrements 1px until fit or hits `MIN_FONT_SIZE * artworkHeight` floor; log warning at floor if still doesn't fit.
-- **Approximation for character width:** `avgCharWidthPx = fontSizePx * 0.6`. Rough but adequate for MVP.
+- **Sharp text stamping design (rewritten Aug 24):** SVG-per-bubble containing a single `<path>` of glyph outlines produced by opentype.js. No `<text>`, no `font-family`, no `@font-face`. Lines are centred per-line on measured width (paths have no `text-anchor`); auto-shrink decrements 1px until it fits **both axes** or hits the `MIN_FONT_SIZE * artworkHeight` floor, logging a warning at the floor.
+- **Character width comes from real font metrics** — `font.getAdvanceWidth(text, size)`, kerning included. Replaces the `fontSizePx * 0.6` approximation, which also meant width was never actually checked.
 
 **SD worker orchestration (Part E)**
 - **`PageVersion` row created BEFORE BullMQ enqueue** — inside a `$transaction` in `enqueuePreviewGenerationJobs`. Enqueue happens after commit. If Redis fails, orphaned QUEUED rows exist in DB (recoverable) but no data lost.
@@ -381,3 +396,78 @@
 
 **Send-to-print & PDF compilation (added Aug 21)**
 - **State machine post-CONFIRMED has explicit failure branches:** `COMPILING_PDF → PDF_FAILED` and `SHIPMENT_QUEUED → SHIPMENT_FAILED`. Both terminal, both require admin retry. Full chain:
+<!-- ⚠️ The "Send-to-print & PDF compilation" entry above ends mid-sentence ("Full chain:").
+     Pre-existing truncation, noticed Aug 24 session 2. The state machine it was describing is
+     documented in full in PROJECT_CONTEXT.md §5 under "Session state chain post-CONFIRMED". -->
+
+---
+
+---
+
+## Shiprocket integration (added Aug 29)
+
+**Auth token lifecycle**
+- **Auth token cached in `SystemConfig`, not in-memory.** In-memory would make each of four processes log in independently — wasted round-trips and multiple valid tokens floating around. DB cache means one login per 10 days across the whole system.
+- **Token refresh margin: refresh 12 h before Shiprocket's documented 10-day expiry.** Prevents a long-running request from racing with mid-flight expiry.
+
+**Client module structure**
+- **`src/lib/shiprocket.ts` is the sole file that talks to Shiprocket.** Workers, webhook, admin endpoints, and services all go through it. Same pattern as `razorpay.ts` and `runpodClient.ts`.
+- **Retry policy matches runpodClient exactly:** network / 5xx / 429 retryable, other 4xx not. Three attempts total with progressive backoff.
+- **Error codes split by fault domain:** `SHIPROCKET_*_FAILED` = transport (retryable), `SHIPROCKET_*_REJECTED` = Shiprocket said no (not retryable), `SHIPROCKET_*_MALFORMED` = response parse issue (not retryable).
+
+**Two-stage dimensions flow**
+- **Phase A (worker, auto) uses placeholder dimensions from `shipping.ts`.** Real dimensions come at packaging time.
+- **Phase B (admin endpoint, inline) pushes real dimensions via `updateOrder` BEFORE `assignAwb`.** Courier pricing depends on volumetric weight; wrong dimensions mean wrong charges or courier refusal at handover.
+- **Phase B runs inline from the admin endpoint, not as a queued job.** Admin waits ~3–5 seconds for the sync response; simpler than adding a second queue + status push. Revisit only if admin UX complains.
+
+**Idempotency**
+- **`createShipmentForSession` uses two-tier idempotency check** — `Order.shiprocketOrderId` set AND `Order.status` past the transition point = no-op. `shiprocketOrderId` set but status inconsistent = log-and-no-op (needs admin).
+- **Shiprocket's `create/adhoc` rejects duplicate `order_id` with 422**, and blocks reuse of cancelled-order IDs. Retry contract lives on our side, not theirs — never call `createOrder` twice with the same ID without checking DB first.
+- **`assignAwb` is NOT idempotent** without `status: "reassign"`. Worker must check `Order.awbNumber` before calling.
+- **`generatePickup` is NOT idempotent.** Worker must check `Order.pickupGeneratedAt` before calling.
+
+**Webhook**
+- **Auth is a plain shared token in `x-api-key` header**, not HMAC. Shiprocket doesn't offer signature-based auth.
+- **Idempotency key synthesized as `shiprocket:${awb}:${current_status_id}:${current_timestamp}`.** Shiprocket sends no event id; this tuple is stable across their retries of the same event and distinct across genuinely new scans.
+- **Payload with missing dedup fields (`awb`, `current_status_id`, `current_timestamp`) is logged and dropped**, not double-processed. Cannot dedupe without a stable key.
+- **`current_status` normalized to uppercase before mapping lookup.** Shiprocket's casing is inconsistent across couriers (`"IN TRANSIT"` vs `"Delivered"`).
+- **`WEBHOOK_ALLOWED_TRANSITIONS` gates every `Order.status` flip.** DELIVERED and CANCELLED are terminal — webhook can never overwrite them. `SHIPPED` allows self-transition (timestamps refresh cleanly on repeat webhooks).
+- **`shippedAt` / `deliveredAt` set only on the FIRST transition** (`!order.shippedAt` check). Repeat webhooks don't reset the timestamp.
+- **`Order.trackingStatus` always updated on every webhook**, even when `Order.status` doesn't change. Raw audit trail for admin.
+
+**Status visibility split**
+- **Users see only mapped `Order.status`** (5–7 friendly labels via `toPublicStatus()`).
+- **Admin sees BOTH mapped `Order.status` AND raw `Order.trackingStatus`** on the order list, plus full `WebhookEvent.payloadJson` history on the detail page.
+- **Nothing hidden from users — just organized by audience.** If users ever want more detail, expose `trackingStatus` on the user tracking page (zero backend change).
+
+**Feature scope decisions**
+- **NEVER cache Shiprocket-owned URLs (label, manifest).** Fetched fresh on every admin click. Shiprocket may rotate storage; stored URLs risk becoming dead links. Applies to `generateLabel`, `generateManifest`, `printManifest`.
+- **Manifest generation deferred to Shiprocket dashboard for launch.** Backend functions exist; no admin endpoint or frontend UI. Admin prints manifests from Shiprocket's own portal. Revisit if context-switching becomes friction.
+- **No user-facing shipment cancellation.** Backend `cancelOrder` exists for admin use only (wrong address, refund, defect, duplicate, abandoned READY_TO_SHIP).
+- **International shipping deferred to Phase 2.** Schema fields already anticipate it (`Order.isInternational`); adding later is a ~6–10h additive branch (new endpoint variants + IEC/AD/HSN payload fields). Requires client IEC + AD Code + Shiprocket International product active — 3–6 weeks of client-side paperwork.
+- **Package defaults hardcoded** in `shipping.ts`: 25 × 20 × 1 cm, 0.25 kg. Real dimensions per order supplied by admin at packaging (Phase B).
+
+**Worker structure**
+- **`shiprocketWorker` is a thin wrapper** matching `pdfWorker`'s shape — all logic lives in `shiprocket.service.ts::createShipmentForSession`.
+- **Final-failure handler runs only after BullMQ exhausts all 3 retries** (`attemptsMade >= opts.attempts`). Flips `Order.status = SHIPROCKET_FAILED` and `OrderSession.status = SHIPMENT_FAILED` with `updateMany` status guards to prevent overwriting good state on a race.
+- **API user email may be swapped later without code change** — credentials in `.env` + Render only. Currently client-owned as of this session.
+
+**Never do (Shiprocket)**
+- **Never cache label / manifest URLs on our side.** Shiprocket owns them; fetch fresh.
+- **Never call `createOrder` for an `Order` that already has `shiprocketOrderId` set** — Shiprocket 422s on duplicate order_id and blocks reuse of cancelled-order IDs. Worker must check DB first.
+- **Never call `assignAwb` or `generatePickup` twice for the same shipment without status guards** — neither is idempotent. Check `Order.awbNumber` and `Order.pickupGeneratedAt` respectively.
+- **Never enqueue Phase B as a job** — runs inline from admin endpoint. Adding a queue would need progress-push infrastructure for no real gain at current volume.
+- **Never expose Shiprocket raw `trackingStatus` on the user-facing UI** — user sees mapped `Order.status` only. Raw text is admin-only.
+- **Never store the auth token in-memory across worker processes** — each process would log in independently, wasting round-trips. Use `SystemConfig` cache.
+- **Never let the webhook overwrite `Order.status = DELIVERED`** — `WEBHOOK_ALLOWED_TRANSITIONS` doesn't list DELIVERED as a source for anything.
+- **Never trust `current_status` casing from Shiprocket** — normalize to uppercase before `SHIPROCKET_STATUS_MAP` lookup.
+- **Never build manifest UI in the admin panel for launch** — Shiprocket's dashboard already does it well. Backend function exists as a building block.
+
+---
+
+## SUPERSEDED
+
+Entries replaced in place; kept as one-liners so the old shape isn't re-proposed.
+
+- **(Aug 24 · s2) "Font embedded as base64 `@font-face` data URI" in the Sharp text-stamping design** — never worked; librsvg discards the rule. Replaced by glyph outlines via opentype.js.
+- **(Aug 24 · s2) "`avgCharWidthPx = fontSizePx * 0.6`, rough but adequate for MVP"** — replaced by real advance widths, which also revealed that bubble width was never being checked at all.

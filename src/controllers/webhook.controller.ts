@@ -3,6 +3,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { logger } from "../lib/logger.js";
 import {
   handleRazorpayWebhook,
+  handleShiprocketWebhook,
   WebhookVerificationError,
 } from "../services/webhook.service.js";
 
@@ -32,6 +33,34 @@ export const razorpayWebhookHandler = asyncHandler(
       }
       // Any other error is unexpected — let Express error handler take it.
       // Razorpay will retry, which is what we want on transient failures.
+      throw error;
+    }
+  }
+);
+
+export const shiprocketWebhookHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    // express.raw() puts a Buffer here — same as razorpay.
+    const rawBody = req.body as Buffer;
+    // Shiprocket sends the shared secret in x-api-key (per our webhook
+    // dashboard config: Auth Token Type = x-api-key).
+    const providedToken = req.header("x-api-key");
+
+    try {
+      await handleShiprocketWebhook(rawBody, providedToken);
+      // 200 acks the webhook — Shiprocket stops retrying this event.
+      res.status(200).json({ received: true });
+    } catch (error) {
+      if (error instanceof WebhookVerificationError) {
+        logger.warn(
+          { message: error.message },
+          "Shiprocket webhook verification failed"
+        );
+        // 400 = permanent, Shiprocket should not retry.
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      // Anything else = transient. Let Shiprocket retry.
       throw error;
     }
   }

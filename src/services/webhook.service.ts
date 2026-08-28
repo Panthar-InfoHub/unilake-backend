@@ -3,6 +3,8 @@ import { verifyWebhookSignature } from "../lib/razorpay.js";
 import { logger } from "../lib/logger.js";
 import { enqueuePaidGenerationJobs } from "./session.service.js";
 import { Prisma } from "../generated/prisma/client.js";
+import { config } from "../config/env.js";
+import { processShiprocketStatusUpdate } from "./shiprocket.service.js";
 
 /**
  * Handle an incoming Razorpay webhook.
@@ -241,3 +243,118 @@ export class WebhookVerificationError extends Error {
   }
 }
 
+// ============================================================
+// SHIPROCKET WEBHOOK
+// ============================================================
+
+/**
+ * Handle an incoming Shiprocket tracking webhook.
+ *
+ * Differences from the Razorpay handler:
+ *   - Auth: plain token comparison against x-api-key header (no HMAC)
+ *   - No provider-supplied event id — we synthesise one from
+ *     awb + current_status_id + current_timestamp so retries of the SAME
+ *     event dedupe correctly but genuinely new events (later scan, new
+ *     status) process normally.
+ *   - Business logic delegated to processShiprocketStatusUpdate() in
+ *     shiprocket.service.ts, same pattern as razorpay -> session.service.ts.
+ */
+export async function handleShiprocketWebhook(
+  rawBody: Buffer,
+  providedToken: string | undefined
+): Promise<void> {
+  // 1. Token verify
+  if (!providedToken) {
+    throw new WebhookVerificationError("Missing x-api-key header");
+  }
+  if (providedToken !== config.shiprocket.webhookToken) {
+    throw new WebhookVerificationError("Invalid webhook token");
+  }
+
+  // 2. Parse
+  const rawBodyStr = rawBody.toString("utf8");
+  let payload: any;
+  try {
+    payload = JSON.parse(rawBodyStr);
+  } catch {
+    throw new WebhookVerificationError("Malformed webhook payload");
+  }
+
+  const awb: string | number | undefined = payload?.awb;
+  const currentStatus: string | undefined = payload?.current_status;
+  const currentStatusId: number | undefined = payload?.current_status_id;
+  const currentTimestamp: string | undefined = payload?.current_timestamp;
+  const courierName: string | undefined = payload?.courier_name;
+
+  // 3. Idempotency key.
+  //
+  // Shiprocket does not send an event id header. Same event redelivered by
+  // Shiprocket carries identical awb + status_id + timestamp, so the tuple
+  // is a stable dedup key. If any of those three is missing we cannot
+  // dedupe safely — log and drop rather than double-process.
+  if (
+    awb === undefined ||
+    currentStatusId === undefined ||
+    !currentTimestamp
+  ) {
+    logger.warn(
+      { awb, currentStatusId, currentTimestamp, currentStatus },
+      "Shiprocket webhook missing dedup fields — cannot dedupe, ignoring"
+    );
+    return;
+  }
+  const eventId = `shiprocket:${awb}:${currentStatusId}:${currentTimestamp}`;
+  const eventType = currentStatus ?? `status_${currentStatusId}`;
+
+  // 4. Insert WebhookEvent — P2002 = duplicate = already processed.
+  try {
+    await prisma.webhookEvent.create({
+      data: {
+        source: "shiprocket",
+        eventId,
+        eventType,
+        payloadJson: payload,
+        orderId: null, // backfilled below once we resolve the order
+      },
+    });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      logger.info(
+        { eventId, eventType, awb },
+        "Duplicate Shiprocket webhook — already processed, skipping"
+      );
+      return;
+    }
+    throw error;
+  }
+
+  // 5. Delegate to service for the actual state update.
+  const result = await processShiprocketStatusUpdate(payload);
+
+  // 6. Backfill orderId on the WebhookEvent row if we resolved one.
+  if (result.orderId) {
+    await prisma.webhookEvent
+      .update({
+        where: { eventId },
+        data: { orderId: result.orderId },
+      })
+      .catch(() => {
+        // Non-fatal — event row exists, just missing FK backfill.
+      });
+  }
+
+  logger.info(
+    {
+      eventId,
+      eventType,
+      awb,
+      courierName,
+      orderId: result.orderId ?? null,
+      statusFlipped: "statusFlipped" in result ? result.statusFlipped : false,
+    },
+    "Shiprocket webhook processed"
+  );
+}
