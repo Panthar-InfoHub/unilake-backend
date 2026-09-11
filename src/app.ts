@@ -26,11 +26,11 @@ const allowedOrigins = [
   "http://localhost:3000",         // local dev
 ];
 
-// app.use(
-//   pinoHttp({
-//     logger: logger,
-//   })
-// );
+app.use(
+  pinoHttp({
+    logger: logger,
+  })
+);
 app.use(
   cors({
     origin(origin, callback) {
