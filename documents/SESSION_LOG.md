@@ -4,6 +4,57 @@
 
 ---
 
+## Session — September 9–11, 2026 — Font shaping crash, a three-day misdiagnosis, and the preloader
+
+**Triggered by:** A production comic generation failed. Backend logs showed 12 error lines — actually one deterministic error, 2 pages × 3 BullMQ attempts × 2 log sites: `substitutionType : 62 lookupType: 6 - substFormat: 2 is not yet supported`, thrown by opentype.js while measuring text. Two of three preview pages died; the third (no bubbles) survived.
+
+### Phase 1 — The shaper crash
+Traced to opentype.js's text-shaping engine applying the font's `ccmp` table during `getAdvanceWidth`. The library implements five lookup encodings (`11, 12, 21, 51, 53`) and **throws** on everything else instead of skipping. Confirmed no render option disables it: the composition feature is registered unconditionally and queried under the `"delf"` (default) script. Built a per-glyph fallback (`layoutUnshaped`, `detectShapingSupport`, `LoadedFont.canShape`) that bypasses the shaper. Verified against real crashing fonts found by scanning all 128 system fonts — `bahnschrift.ttf` and `SansSerifCollection.ttf` reproduce the exact production error. Geometry matched the shaped path to **0.000px** across three fonts.
+
+### Phase 2 — The truncation, misdiagnosed three times
+Crash gone, but the cover printed "Pu" instead of "Pulkit". I diagnosed this wrong three times: (1) broken font metrics — disproved by an advance-vs-ink ratio of 0.94; (2) wrong dialogue data — disproved by an admin screenshot showing `{name}`; (3) canvas clipping asserted without evidence. Each theory was built on geometry inferred by measuring pixels in the generated PNG, and the numbers kept contradicting each other (the box had to be ~102px to explain the clipping and ~313px to explain the lack of shrink — both can't hold).
+
+### Phase 3 — Patch, then instrument
+Patched opentype.js via `patch-package` so unsupported lookups return a no-op. Verified safe: `lookupFeature` only invokes the returned function for types it handles, so a `62` no-op is never called. Production logs then showed `unshapedFonts: []` and no warning — patch live, fallback now dead code — **and the output was byte-identical**, which exonerated the fallback and proved the bug was downstream. Stopped guessing and added a `Bubble layout resolved` info log. One regeneration answered it: `boxWidthPx: 788, measuredWidthPx: 327, overflowPx: -461`. The user had widened the bubble; the box had simply been too small, and `buildBubbleSvg` sizes its canvas to the box, so the excess glyphs were painted and discarded.
+
+### Phase 4 — Preloader
+Separate request. `ComicPreloader` had two bugs: a `Math.random()` offset re-rolled every tick (bar visibly moved backwards), and `[onComplete]` effect deps against an inline arrow from a parent that re-renders constantly (timer torn down and restarted, resetting progress toward zero — the dominant cause). Rewrote as a 55 s linear CSS keyframe with `onComplete` behind a ref. First implementation used a CSS transition flipped from `requestAnimationFrame`; on review I judged that it could fail to animate at all if React's effect landed in the same frame as the initial paint, and replaced it with `@keyframes`, which has no such dependency.
+
+### Decisions locked
+- opentype.js patched to skip unsupported GSUB lookups, not throw; `patches/` must be COPYed before `npm ci`
+- Never try to disable `ccmp` via render options — no option reaches it
+- Layout diagnostics log at `info`, not `debug` — production runs at `info`
+- Never diagnose a render bug by inferring geometry from pixels when a log line would state it
+- Never verify a font fix only against an upstream copy of the font
+- Preloader is a fixed ~55 s stall; errors break through; no early exit
+- Progress bars are CSS keyframes, never JS intervals; never a transition flipped from an effect
+- Timer-owning children take callbacks via ref, not effect deps
+
+### Work done
+- `patches/opentype.js+2.0.0.patch`, `patch-package` devDep, `postinstall` script, `Dockerfile` `COPY patches`
+- `textStamp.ts`: fallback renderer, shaping probe, `LoadedFont`, `fitted` flag, `Bubble layout resolved` log, `unshapedFonts` in the page-level log
+- `ComicPreloader.tsx` rewritten; `preloader-fill` keyframes in `globals.css`; `preloaderInterrupted` in the preview page
+- Verified: backend `tsc` clean; frontend `tsc`, `eslint`, `next build` clean; keyframe present in the production CSS bundle
+
+### Tasks added
+- No-clip fix for `buildBubbleSvg` (deferred by decision)
+- Delete the dead fallback renderer once the patch has soaked in production
+- Upload-time font render validation
+- Frontend failed-page state (`PreviewPageCard.tsx:59`)
+- Lower `Bubble layout resolved` to `debug`
+- Runtime-verify the preloader in a browser
+
+### Mistakes caught mid-session
+- **Three wrong diagnoses before instrumenting.** Root error: inferring geometry from output pixels instead of logging it. Should have added the log on day one.
+- **Tested the wrong font file for two days.** Every check ran against a Calistoga copy placed locally; the deployed font was a different upload (the R2 key changed between runs). Never tested the actual artefact.
+- **Shipped a preloader animation with a latent timing flaw** — caught only because the user asked "is it fixed properly?" rather than accepting the claim.
+- **Declared the truncation "a data problem"** on a screenshot-free assumption; the user's screenshot disproved it immediately.
+
+### What is explicitly not done
+`buildBubbleSvg` still clips silently — the most dangerous remaining behaviour, since a printed book can lose characters with no error. The original shrink failure was never explained and the evidence (the old bubble row) was overwritten. The preloader has never been watched in a browser. Both repos have uncommitted work, and the two credential rotations outstanding since August are still outstanding.
+
+---
+
 ## Session — August 29, 2026 — Shiprocket integration end to end, sections 1–5 of 10
 
 **Triggered by:** Guts opened with the full-project analysis prompt asking for a stance-check and remaining-work estimate. After confirming the four docs, decided the biggest single unbuilt block was the real Shiprocket integration and started sectioning it out. Ended the session with 5 of 10 sections complete, ~5.5–9 h of unblocked work remaining and the rest gated on the client's GST activating their Shiprocket pickup address.
@@ -90,104 +141,9 @@ Sections 6–8 can proceed immediately without blocking on GST.
 
 ---
 
-## Session — August 24, 2026 (session 2) — The font bug, glyph-outline rendering, per-bubble colour, and a dead Redis
-
-**Triggered by:** Guts opened with another full-project analysis, then reported the real problem: text stamping "works great in local development but in production it doesn't print anything," and — added almost as an afterthought — the uploaded font was never being used *even locally*. Two screenshots came with it: production showing tofu boxes on the sign, dev showing the name in a plain serif that was obviously not the comic font. Those two images turned out to be the whole diagnosis.
-
-### Phase 1 — The font bug
-
-Both symptoms were **one root cause**, and the afterthought was the more revealing half.
-
-`textStamp.ts` embedded the font into the SVG as an `@font-face` with a base64 data URI. Sharp renders SVG through **librsvg**, which delegates all font resolution to **fontconfig** — it can only use fonts *installed on the machine* and discards embedded webfonts entirely. So the font was faithfully downloaded from R2, base64'd, inlined, and ignored.
-
-That single fact explains both environments: Windows has hundreds of installed fonts so fontconfig substituted an arbitrary one (text appeared, wrong typeface); `node:22-bookworm-slim` ships **zero** fonts so there was nothing to substitute (blank). Neither errored — Sharp treats an unresolvable font as empty output and reports success, which is how blank pages reached `SD_READY` unnoticed.
-
-The logs ruled out the obvious suspect before I proposed anything: `fontsLoaded: 1` in **both** dev and prod, counted after the R2 download. Storage, keys and credentials were all fine. The failure was entirely at the render step, after the bytes were already in memory.
-
-Proved it empirically rather than asserting it — rendered the same string twice on the same machine, once via glyph paths (2,353 dark pixels) and once via the old `@font-face` SVG (1,578 pixels, wrong glyphs, system fallback).
-
-### Phase 2 — Options, and the rewrite
-
-Offered two routes: put the font on disk and register it with fontconfig, or stop using SVG `<text>` and convert glyphs to `<path>` outlines. Guts picked outlines.
-
-`textStamp.ts` rewritten around opentype.js. A `<path>` is pure geometry, so rendering depends on nothing installed on the host — **no Dockerfile change needed**, which was the point.
-
-Real font metrics then fixed three things that had been estimates: wrapping now measures actual advance widths instead of `fontSize * 0.6`; `fitTextToBox` checks **width as well as height**, so a single unbreakable word (a long child's name) shrinks instead of spilling — width had never been checked at all; and vertical centring uses the font's own ascender/descender.
-
-Added fail-loud guards for the three conditions that previously rendered nothing: no font assigned, unparseable font (including WOFF2), and a font missing glyphs for the text. `escapeXml()` was deleted — no user string reaches the SVG any more.
-
-Verified by stubbing R2 via `module.registerHooks` and running the real module: six behavioural checks passed, and a visual crop confirmed correct wrapping, centring and shrink-to-fit.
-
-### Phase 3 — Per-bubble colour
-
-Guts asked about colour *and* weight. Colour was easy. Weight was the interesting answer: **a font file holds exactly one weight**, so a weight slider means either a second uploaded font (already possible, zero code) or synthetic stroke-thickened bold (visibly fake at print resolution). Guts deferred weight to a client conversation and took colour alone.
-
-Four structured questions before planning — picker style, new-bubble default, legibility handling, bulk apply. Answers: free hex only, inherit last colour on the page, warn-don't-block, no bulk apply. Wrote a 12-step plan as an artifact, then implemented it.
-
-The plan's own warning turned out to be the load-bearing part: `validateBody` **replaces** `req.body`, so a field absent from the Zod schema is dropped silently and the save still returns 200. Backend had to ship before frontend or the colour would vanish on reload with nothing in the logs.
-
-Verified with 15 schema cases and a pixel test: `#d92b2b` produced 647 exact-match pixels, and three differently-coloured bubbles on one page kept their colours with **zero** foreign pixels between them.
-
-### Phase 4 — Redis died, then moved providers
-
-Deploy went out; logs filled with `ERR max requests limit exceeded. Limit: 500000, Usage: 500003`.
-
-Not traffic. **Idle worker polling.** The stack trace pointed at `bull:shiprocket:*` — the stub worker that has never processed a real job. Checked the installed BullMQ defaults rather than guessing: `drainDelay: 5` seconds, `stalledInterval: 30000` ms. That's ~20,000 commands/day per idle worker, ~60,000/day across three, which burns Upstash's 500k monthly free tier in about eight days of an empty queue.
-
-**Resolved: migrated to Redis Cloud.** Guts moved `REDIS_URL` off Upstash to a Redis Cloud instance, which bills by memory rather than per command, so the quota-exhaustion mode is gone entirely. Upstash is no longer in use.
-
-One deployment trap on the way: after the local `.env` was switched, **Render's `REDIS_URL` was still pointing at the dead Upstash instance**, so production remained broken while local worked — which presents as "the fix didn't work" rather than "the fix wasn't deployed." Updating the Render env var restored the queues.
-
-### Decisions locked
-
-Full detail in `DECISIONS.md` under the `Aug 24 · s2` entries. The load-bearing ones:
-
-**Never put `@font-face` in an SVG handed to Sharp, and never install fonts into the image to "fix" it** — outlines remove host dependence entirely.
-
-**No fallback font.** Falling back is precisely what hid the outage; a bubble with dialogue and no font now fails the job.
-
-**`Bubble.fontColor` accepts exactly `#rrggbb`** — one canonical form end to end, no shorthand, no alpha, no colour names.
-
-**Colour legibility is advisory, never enforced server-side** — the server cannot see the artwork behind a bubble.
-
-**BullMQ is incompatible with per-command-billed Redis** — moved to Redis Cloud (memory-billed) rather than tuning around Upstash's pricing.
-
-**Every env-var change is two changes** — local `.env` and Render. The Redis switch worked locally while production stayed dead for exactly this reason.
-
-### Work done
-
-**Backend:** `textStamp.ts` rewritten (opentype.js, outlines, real metrics, fail-loud); `config/generation.ts` (`DEFAULT_FONT_COLOR`, `FONT_COLOR_PATTERN`); `bubble.schema.ts` (regex → lowercase → default/optional); `bubble.service.ts` (create + update); `schema.prisma` + migration `20260824023534_added_font_color_in_bubble`. Deps: `opentype.js`, `@types/opentype.js`.
-
-**Frontend (separate repo):** hex picker with draft-revert-on-blur, WCAG low-contrast warning, Konva canvas painting real colour, sample-name substitution on canvas (Short/Long toggle lifted to the page so sidebar and canvas agree), and a fix for the editor panel being clipped. Typecheck, lint and `next build` all clean.
-
-**Also produced:** two combined commit messages, and a 12-step implementation plan published as an artifact.
-
-### Tasks added
-
-- Rotate the Redis Cloud password — the full `REDIS_URL` with credentials was pasted into the chat transcript.
-- Check for payments stranded at `PAID` during the outage; `PAID` is still not in `REGENERATABLE_STATUSES`.
-- Trim idle worker polling when convenient — no longer urgent on Redis Cloud, but ~60k commands/day of noise remains.
-- Runtime-verify the font fix on a real generation — the actual uploaded font has **never once** rendered correctly.
-- Audit for existing bubbles with no font assigned; those will now fail generation rather than render blank.
-- Decide whether the font upload validator should reject WOFF2 at upload rather than at generation.
-- Font weight — pending the client conversation.
-
-### Mistakes caught mid-session
-
-- **My first colour-render test reported three FAILs that were the test's fault.** It sampled the *darkest* pixel, which on antialiased glyphs is an edge pixel, so `#d92b2b` read back as `#d82b2b`. Rewrote it to count exact matches and find the dominant ink instead. Nearly reported a working feature as broken.
-- **Put a JSX comment between a ternary's `? (` and its element** while fixing the sidebar clipping. `{/* … */}` there parses as an object literal, not a comment — six syntax errors. Caught on typecheck, moved the comment above the ternary.
-- **First `ColorField` implementation used a `useEffect` to resync the hex draft**, which React's linter correctly flagged as cascading renders. Rewrote using adjust-state-during-render plus a `key`, which also fixed an edge case the effect version had (switching between two bubbles sharing a colour kept a stale draft).
-- **Verified BullMQ's polling defaults in `node_modules` rather than quoting them from memory** — the whole 60k/day figure rests on those two numbers.
-- **Nearly wrote one commit message per repo as asked**, then flagged that both repos contain two unrelated bodies of work and a single commit would make the production font fix unrevertable on its own. Guts chose combined anyway, which is a legitimate call — but it was worth surfacing rather than silently complying.
-
-### What is explicitly not done
-
-The font fix has **not** been exercised on a real generation — everything is verified at unit and pixel level with a stubbed R2 and Arial, never against a real comic font through the real worker. Colour has not been round-tripped through the admin UI. Redis is healthy again on Redis Cloud, so nothing is blocked, but everything from the previous not-done list still stands: the paid half of the pipeline has never run, and no real payment has completed end to end.
-
----
-
 ## Older sessions (collapsed)
 
+- **August 24, 2026 (session 2)** — The font bug: text stamping printed tofu boxes in production and a substituted system serif locally, both from one root cause — Sharp renders SVG through librsvg, which resolves fonts via fontconfig and silently discards an embedded `@font-face` data URI. Rewrote `textStamp.ts` to convert glyphs to SVG `<path>` outlines with opentype.js, removing host font dependence entirely; real advance widths replaced the `fontSizePx * 0.6` estimate and revealed bubble width was never being checked. Added `Bubble.fontColor` (`#rrggbb` only, one canonical form end to end) and made three previously-silent conditions fail loud (no font assigned, unparseable font, missing glyphs) with no fallback font by design. Redis died mid-session (~15 min); migrated to Redis Cloud. Verified at unit and pixel level only — never against a real comic font through the real worker, which is what the Sep 9–11 session eventually did.
 - **August 24, 2026 (session 1)** — Full-project analysis surfacing a data-loss bug in `updateTeamMember` (no `oldUrl !== newUrl` guard, would silently delete R2 photos on re-save; five schema fields `.optional()` but not `.nullable()`). Then designed and built three CMS modules end to end (How It Works, FAQ, Blog — 20 endpoints total, migration `20260823212030`) with front-loaded structured questioning before schema and again before implementation. How It Works collapsed to a singleton with a JSON steps array (Guts's own simplification), FAQ scoped to global not per-comic, Blog with frozen slugs and HTML body from a rich-text editor. Decisions locked: every asset-replace path needs old≠new guard; `.optional()` without `.nullable()` on nullable columns is a bug not a style choice; frontend owns HTML sanitization on render. Authored `REVIEWS_TEAM_FEEDBACK_API.md` and `HOWITWORKS_FAQ_BLOG_API.md`. Nothing runtime-tested beyond typecheck + boot.
 - **August 22, 2026** — Production deployment (Render + Vercel on subdomains of `unilakekids.com`) plus three payment-path bugs, one diagnosed from live logs. Fixed the checkout re-call dead end (`initiateCheckout` validated status before checking for an existing Order, making the reuse branch unreachable and 409-ing anyone who closed the Razorpay modal); deleted the `checkout.service.ts` copy of `assertNotExpired` that had silently lost its `expiresAt` comparison and was failing every session as expired; and re-keyed webhook idempotency onto the `x-razorpay-event-id` header after Render logs showed `payment.authorized` claiming the shared payment id 671 ms early and `payment.captured` being discarded as a duplicate. Locked: hosting on subdomains of one owned domain (first-party cookies), single instance with autoscaling off, no host that suspends idle instances, and checkout retries returning the Order's snapshotted amount. Rewrote `production.md` into an 11-step runbook; fixed three blocking frontend checkout bugs in the other repo. `RAZORPAY_WEBHOOK_SECRET` flagged for rotation.
 - **August 21, 2026** — Five-bug sprint + three features shipped. Closed Bugs 1–4 and 6 from Aug 19 (paid-session expiry exemption via `EXPIRY_EXEMPT_STATUSES`; `coverImageUrl` → `coverThumbnailUrls`; stranded-`PAID` fixed by re-throwing so Razorpay retries, deleting the `WebhookEvent` row first; `checkoutParamsSchema` wired; 12-field post-payment PATCH lock). Deferred Bug 5 (rate limiting) and Bug 7 (Country toggle). Built `maybeMarkPaidReady` + `session:paid-ready`, the send-to-print endpoint (all-pages selection, in-flight rejection, idempotent retry), and PDF compilation via pdf-lib with a stub Shiprocket worker. Locked: post-`CONFIRMED` state machine with explicit `PDF_FAILED`/`SHIPMENT_FAILED` branches; PDF pages sized to source images; PDF in the public bucket for permanent re-download; PNG→JPEG@85 before embedding. Nothing runtime-verified — typecheck + boot only, by explicit policy.

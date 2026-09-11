@@ -23,6 +23,33 @@
 // pure geometry and renders identically on every machine, with no fonts
 // installed anywhere. It also gives us real glyph metrics, so wrapping and
 // auto-shrink are measured rather than estimated.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⚠️ SECOND THING TO KNOW: not every valid font can be SHAPED by opentype.js.
+//
+// Asking opentype.js to measure or draw a string runs its text-shaping engine
+// first, which applies the font's OpenType feature tables (ligatures, glyph
+// composition, and so on). That engine implements only a subset of the ways
+// those tables can legally be encoded, and when it meets an encoding it does
+// not implement it THROWS instead of skipping the rule.
+//
+// A real font uploaded in production did exactly that:
+//   "substitutionType : 62 lookupType: 6 - substFormat: 2 is not yet supported"
+// It crashed every page it appeared on, three BullMQ attempts each, because a
+// deterministic library gap cannot be retried away. The font itself was fine —
+// it parsed cleanly and contained every glyph the dialogue needed. Only the
+// shaping step failed.
+//
+// There is no option to disable this. The composition feature is switched on
+// unconditionally inside the library and queried under the "default" script,
+// so no combination of render options avoids it.
+//
+// So: we probe each font ONCE at load time and, if shaping throws, fall back to
+// laying the text out one glyph at a time (see layoutUnshaped). The fallback
+// gives up ligatures and contextual substitution for that one font — invisible
+// for Latin comic dialogue — and keeps kerning, metrics and everything else.
+// A page renders slightly plainer instead of not rendering at all.
 
 import sharp, { type OverlayOptions } from "sharp";
 import opentype from "opentype.js";
@@ -39,6 +66,25 @@ import type {
 } from "../../../generated/prisma/client.js";
 
 type BubbleWithFont = Bubble & { font: Font | null };
+
+/**
+ * A parsed font plus what we learned about how it can safely be rendered.
+ *
+ * `canShape` is decided ONCE, at load time (see detectShapingSupport), and every
+ * measure and draw call downstream reads that flag rather than discovering the
+ * answer for itself. Keeping the decision in one place is what guarantees
+ * measuring and drawing stay in lockstep: a line measured with the shaper is
+ * always drawn with the shaper, and a line measured without it is always drawn
+ * without it. If those two ever disagreed, every line would be centred against
+ * a width that doesn't match the glyphs actually painted.
+ */
+type LoadedFont = {
+  font: opentype.Font;
+  /** Display name, for error messages. */
+  name: string;
+  /** False when this font's own feature tables crash opentype.js's shaper. */
+  canShape: boolean;
+};
 
 type StampTextParams = {
   page: Page;
@@ -105,6 +151,107 @@ function parseFont(fontBuffer: Buffer, fontName: string, fontKey: string): opent
 }
 
 /**
+ * Text used to probe whether a font can be shaped.
+ *
+ * Its CONTENT is deliberately unimportant. opentype.js opens a composition
+ * context for the whole string whenever it is longer than one character, and
+ * the crash happens while it walks the font's lookup tables — before it ever
+ * compares them against the characters. So any two-character string is a
+ * complete test, and a font that shapes this shapes anything.
+ *
+ * A short mixed string is used anyway rather than the bare minimum, so the
+ * probe stays meaningful if a future opentype.js makes the context check
+ * character-dependent.
+ */
+const SHAPING_PROBE_TEXT = "AVa fi 1.";
+
+/** Font size for the probe. Irrelevant to the outcome — shaping is size-independent. */
+const SHAPING_PROBE_SIZE_PX = 100;
+
+/**
+ * Decide once whether this font can go through opentype.js's shaper.
+ *
+ * Called exactly once per font per job, straight after parsing, so the cost is
+ * one measurement rather than one try/catch per line per candidate font size —
+ * fitTextToBox alone would otherwise run this hundreds of times per bubble.
+ *
+ * Returns false rather than throwing: a font that cannot be shaped is still
+ * perfectly usable through layoutUnshaped, so this is a routing decision, not
+ * an error. It is logged at warn level because it is worth knowing which font
+ * is degraded and why, without failing the job.
+ */
+function detectShapingSupport(
+  font: opentype.Font,
+  fontName: string,
+  fontKey: string,
+): boolean {
+  try {
+    font.getAdvanceWidth(SHAPING_PROBE_TEXT, SHAPING_PROBE_SIZE_PX);
+    return true;
+  } catch (err) {
+    logger.warn(
+      {
+        fontName,
+        fontKey,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "Font cannot be shaped by opentype.js — falling back to per-glyph layout. " +
+        "Ligatures and contextual substitution are skipped for this font; " +
+        "kerning, metrics and glyph shapes are unaffected.",
+    );
+    return false;
+  }
+}
+
+/**
+ * Lay out `text` one glyph at a time, without the shaper.
+ *
+ * This is a deliberate re-implementation of opentype.js's own forEachGlyph with
+ * exactly one line changed: where the library calls stringToGlyphs() — the call
+ * that runs the shaper and can throw — this maps each character directly through
+ * charToGlyph(). The rest (the unitsPerEm scale, advance accumulation, kerning
+ * between adjacent pairs) mirrors the library's arithmetic exactly, so geometry
+ * is identical for any font whose shaping would not have altered the glyph run.
+ *
+ * Kerning survives. font.getKerningValue() reads GPOS kerning with a fallback to
+ * the legacy `kern` table; that is glyph POSITIONING, which never goes through
+ * the substitution machinery that throws. Only ligatures and contextual
+ * substitution are lost.
+ *
+ * Iterating with a spread walks whole code points rather than UTF-16 halves, so
+ * characters outside the basic plane map to one glyph instead of two broken ones.
+ *
+ * Returns the total advance width, and invokes `onGlyph` for each glyph with its
+ * pen offset relative to the start of the run — so the same walk serves both
+ * measuring (ignore the callback) and drawing (use it).
+ */
+function layoutUnshaped(
+  font: opentype.Font,
+  text: string,
+  fontSizePx: number,
+  onGlyph?: (glyph: opentype.Glyph, penXPx: number) => void,
+): number {
+  const scale = fontSizePx / font.unitsPerEm;
+  const glyphs = [...text].map((char) => font.charToGlyph(char));
+
+  let penXPx = 0;
+
+  for (let index = 0; index < glyphs.length; index += 1) {
+    const glyph = glyphs[index]!;
+
+    onGlyph?.(glyph, penXPx);
+
+    // Matches the library: a glyph with no advanceWidth contributes nothing.
+    if (glyph.advanceWidth) penXPx += glyph.advanceWidth * scale;
+
+    const next = glyphs[index + 1];
+    if (next) penXPx += font.getKerningValue(glyph, next) * scale;
+  }
+
+  return penXPx;
+}
+
+/**
  * Fail loudly when the font has no glyph for a character we're about to draw.
  *
  * Glyph index 0 is `.notdef`. Many fonts draw `.notdef` as an empty outline
@@ -135,9 +282,53 @@ function assertGlyphCoverage(font: opentype.Font, text: string, fontName: string
 // MEASUREMENT (real font metrics — no estimation)
 // ============================================================
 
-/** Advance width of `text` in pixels at `fontSizePx`, kerning included. */
-function measureWidth(font: opentype.Font, text: string, fontSizePx: number): number {
-  return font.getAdvanceWidth(text, fontSizePx);
+/**
+ * Advance width of `text` in pixels at `fontSizePx`, kerning included.
+ *
+ * Routes on `canShape` so that measurement always matches what buildLinePathData
+ * will actually paint — see the note on LoadedFont.
+ */
+function measureWidth(loaded: LoadedFont, text: string, fontSizePx: number): number {
+  return loaded.canShape
+    ? loaded.font.getAdvanceWidth(text, fontSizePx)
+    : layoutUnshaped(loaded.font, text, fontSizePx);
+}
+
+/**
+ * SVG path data for one line of text, with its left edge at `xPx` and its
+ * baseline at `baselineYPx`.
+ *
+ * The shaped and unshaped branches produce the same kind of output — absolute
+ * glyph outlines in artwork coordinates — so the caller does not care which ran.
+ * Concatenating per-glyph path data is valid SVG and matches how buildBubbleSvg
+ * already joins the per-line results.
+ */
+function buildLinePathData(
+  loaded: LoadedFont,
+  line: string,
+  xPx: number,
+  baselineYPx: number,
+  fontSizePx: number,
+): string {
+  if (loaded.canShape) {
+    return loaded.font
+      .getPath(line, xPx, baselineYPx, fontSizePx)
+      .toPathData(PATH_PRECISION);
+  }
+
+  const glyphPaths: string[] = [];
+
+  layoutUnshaped(loaded.font, line, fontSizePx, (glyph, penXPx) => {
+    glyphPaths.push(
+      glyph
+        // Passing the font hands the glyph its own default render options, the
+        // same ones Font.getPath would have applied on the shaped path.
+        .getPath(xPx + penXPx, baselineYPx, fontSizePx, undefined, loaded.font)
+        .toPathData(PATH_PRECISION),
+    );
+  });
+
+  return glyphPaths.join(" ");
 }
 
 type LineMetrics = {
@@ -171,7 +362,7 @@ function lineMetrics(font: opentype.Font, fontSizePx: number): LineMetrics {
  * shrink loop is what actually resolves that.
  */
 function wrapText(
-  font: opentype.Font,
+  loaded: LoadedFont,
   text: string,
   maxWidthPx: number,
   fontSizePx: number,
@@ -185,7 +376,7 @@ function wrapText(
   for (const word of words) {
     const candidate = current ? `${current} ${word}` : word;
 
-    if (measureWidth(font, candidate, fontSizePx) <= maxWidthPx) {
+    if (measureWidth(loaded, candidate, fontSizePx) <= maxWidthPx) {
       current = candidate;
     } else {
       if (current) lines.push(current);
@@ -201,6 +392,17 @@ function wrapText(
 type FittedText = {
   fontSizePx: number;
   lines: string[];
+  /**
+   * True when the shrink loop found a size that genuinely fits the box on both
+   * axes. False when it exhausted the range and fell back to the floor size,
+   * meaning the text is expected to overflow.
+   *
+   * Purely diagnostic — the caller renders either way. It exists so the layout
+   * log below can distinguish "this fitted at 113px" from "nothing fitted, so
+   * here is the floor", which are very different situations that otherwise look
+   * identical in the output.
+   */
+  fitted: boolean;
 };
 
 /**
@@ -216,7 +418,7 @@ type FittedText = {
  * and logs a warning — overflowing is better than dropping a page.
  */
 function fitTextToBox(
-  font: opentype.Font,
+  loaded: LoadedFont,
   text: string,
   boxWidthPx: number,
   boxHeightPx: number,
@@ -226,13 +428,14 @@ function fitTextToBox(
   const minFontSizePx = Math.max(1, MIN_FONT_SIZE * artworkHeight);
 
   const fits = (fontSizePx: number): string[] | null => {
-    const lines = wrapText(font, text, boxWidthPx, fontSizePx);
+    const lines = wrapText(loaded, text, boxWidthPx, fontSizePx);
     if (lines.length === 0) return null;
 
     const widestLinePx = Math.max(
-      ...lines.map((line) => measureWidth(font, line, fontSizePx)),
+      ...lines.map((line) => measureWidth(loaded, line, fontSizePx)),
     );
-    const totalHeightPx = lines.length * lineMetrics(font, fontSizePx).lineHeightPx;
+    const totalHeightPx =
+      lines.length * lineMetrics(loaded.font, fontSizePx).lineHeightPx;
 
     return widestLinePx <= boxWidthPx && totalHeightPx <= boxHeightPx ? lines : null;
   };
@@ -243,7 +446,7 @@ function fitTextToBox(
     fontSizePx -= 1
   ) {
     const lines = fits(fontSizePx);
-    if (lines) return { fontSizePx, lines };
+    if (lines) return { fontSizePx, lines, fitted: true };
   }
 
   logger.warn(
@@ -258,7 +461,8 @@ function fitTextToBox(
 
   return {
     fontSizePx: minFontSizePx,
-    lines: wrapText(font, text, boxWidthPx, minFontSizePx),
+    lines: wrapText(loaded, text, boxWidthPx, minFontSizePx),
+    fitted: false,
   };
 }
 
@@ -271,7 +475,7 @@ type BubbleSvgInputs = {
   heightPx: number;
   lines: string[];
   fontSizePx: number;
-  font: opentype.Font;
+  loaded: LoadedFont;
   /** Bubble.fontColor — a validated 6-digit hex string, e.g. "#1a1a1a". */
   fill: string;
 };
@@ -288,8 +492,11 @@ type BubbleSvgInputs = {
  * XML-escaping hazard that used to require escapeXml() is gone entirely.
  */
 function buildBubbleSvg(inputs: BubbleSvgInputs): string {
-  const { widthPx, heightPx, lines, fontSizePx, font, fill } = inputs;
-  const { lineHeightPx, ascenderPx, leadingPx } = lineMetrics(font, fontSizePx);
+  const { widthPx, heightPx, lines, fontSizePx, loaded, fill } = inputs;
+  const { lineHeightPx, ascenderPx, leadingPx } = lineMetrics(
+    loaded.font,
+    fontSizePx,
+  );
 
   // Centre the block of lines vertically, then drop to the first baseline.
   const blockHeightPx = lines.length * lineHeightPx;
@@ -299,11 +506,11 @@ function buildBubbleSvg(inputs: BubbleSvgInputs): string {
   // Each line is centred on its own measured width — <path> has no text-anchor.
   const pathData = lines
     .map((line, index) => {
-      const lineWidthPx = measureWidth(font, line, fontSizePx);
+      const lineWidthPx = measureWidth(loaded, line, fontSizePx);
       const x = (widthPx - lineWidthPx) / 2;
       const baselineY = firstBaselineY + index * lineHeightPx;
 
-      return font.getPath(line, x, baselineY, fontSizePx).toPathData(PATH_PRECISION);
+      return buildLinePathData(loaded, line, x, baselineY, fontSizePx);
     })
     .join(" ");
 
@@ -355,17 +562,23 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
   // Parsed once per page and reused across bubbles sharing a font. This cache is
   // deliberately function-scoped (not module-level) — see the note in
   // PROJECT_CONTEXT: fonts are re-fetched per job by design.
-  const fontCache = new Map<string, opentype.Font>();
+  const fontCache = new Map<string, LoadedFont>();
 
   for (const bubble of bubbles) {
     if (!bubble.font) continue;
     if (fontCache.has(bubble.font.fileUrl)) continue;
 
     const fontBuffer = await downloadFileToBuffer("private", bubble.font.fileUrl);
-    fontCache.set(
-      bubble.font.fileUrl,
-      parseFont(fontBuffer, bubble.font.name, bubble.font.fileUrl),
-    );
+    const font = parseFont(fontBuffer, bubble.font.name, bubble.font.fileUrl);
+
+    // Probe for shaper compatibility here, once, while we hold the font — not
+    // lazily at the first measurement. fitTextToBox measures the same font
+    // hundreds of times per bubble, and this answer never changes.
+    fontCache.set(bubble.font.fileUrl, {
+      font,
+      name: bubble.font.name,
+      canShape: detectShapingSupport(font, bubble.font.name, bubble.font.fileUrl),
+    });
   }
 
   // --- Build a composite entry per bubble ---
@@ -391,8 +604,11 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
       );
     }
 
-    const font = fontCache.get(bubble.font.fileUrl)!;
-    assertGlyphCoverage(font, finalText, bubble.font.name);
+    const loaded = fontCache.get(bubble.font.fileUrl)!;
+
+    // Coverage is checked against the character map, which is exactly what the
+    // unshaped path renders from — so this guard stays accurate on both routes.
+    assertGlyphCoverage(loaded.font, finalText, bubble.font.name);
 
     // 3. Convert normalized coords to pixels
     const xPx = Math.round(bubble.x * page.artworkWidth);
@@ -402,8 +618,8 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
     const initialFontSizePx = bubble.fontSize * page.artworkHeight;
 
     // 4. Fit text into the bubble using real metrics
-    const { fontSizePx, lines } = fitTextToBox(
-      font,
+    const { fontSizePx, lines, fitted } = fitTextToBox(
+      loaded,
       finalText,
       widthPx,
       heightPx,
@@ -413,13 +629,84 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
 
     if (lines.length === 0) continue;
 
+    // --- Layout diagnostics ---
+    //
+    // Every number the renderer actually decided with, in one line. This exists
+    // because a bubble that renders wrong gives you only an image to work from,
+    // and reverse-engineering these values by measuring pixels is slow and
+    // ambiguous — two different causes (a box too narrow vs. a measurement that
+    // under-reports) produce the same looking output.
+    //
+    // The three that matter most when text comes out truncated:
+    //   fitted            false means nothing fitted and this is the floor size
+    //   overflowPx        > 0 means the text is wider than its own SVG canvas,
+    //                     and buildBubbleSvg will clip whatever spills past it
+    //   artworkWidth/Height  the DB's idea of the artwork size; every box and
+    //                     font-size number below is derived from these, so if
+    //                     they disagree with the real file everything downstream
+    //                     is wrong in a way no other log would reveal.
+    const measuredWidthPx = Math.max(
+      ...lines.map((line) => measureWidth(loaded, line, fontSizePx)),
+    );
+    const blockHeightPx = lines.length * lineMetrics(loaded.font, fontSizePx).lineHeightPx;
+
+    // Deliberately `info`, not `debug`: the logger runs at level "info" whenever
+    // NODE_ENV is production (see lib/logger.ts), so a debug line here would be
+    // invisible in exactly the environment where a bad render is most expensive
+    // to reproduce. One line per bubble is a fair price for that. Drop it to
+    // debug once bubble geometry is no longer under investigation.
+    logger.info(
+      {
+        pageId: page.id,
+        bubbleId: bubble.id,
+        fontName: bubble.font.name,
+        canShape: loaded.canShape,
+
+        // What we are drawing
+        text: finalText.slice(0, 60),
+        textLength: finalText.length,
+        lines,
+
+        // The DB's artwork dimensions — everything below is derived from these
+        artworkWidth: page.artworkWidth,
+        artworkHeight: page.artworkHeight,
+
+        // Stored bubble geometry (normalized 0–1)
+        bubble: {
+          x: bubble.x,
+          y: bubble.y,
+          width: bubble.width,
+          height: bubble.height,
+          fontSize: bubble.fontSize,
+        },
+
+        // Resolved pixel geometry — boxWidthPx IS the SVG canvas width
+        xPx,
+        yPx,
+        boxWidthPx: widthPx,
+        boxHeightPx: heightPx,
+
+        // Sizing decision
+        initialFontSizePx,
+        chosenFontSizePx: fontSizePx,
+        fitted,
+
+        // The comparison that decides whether anything gets clipped
+        measuredWidthPx: Math.round(measuredWidthPx),
+        overflowPx: Math.round(measuredWidthPx - widthPx),
+        blockHeightPx: Math.round(blockHeightPx),
+        verticalOverflowPx: Math.round(blockHeightPx - heightPx),
+      },
+      "Bubble layout resolved",
+    );
+
     // 5. Build the SVG (glyph outlines)
     const svg = buildBubbleSvg({
       widthPx,
       heightPx,
       lines,
       fontSizePx,
-      font,
+      loaded,
       fill: bubble.fontColor,
     });
 
@@ -450,6 +737,12 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
       pageId: page.id,
       bubbleCount: bubbles.length,
       fontsLoaded: fontCache.size,
+      // Names of any fonts rendered without shaping. Empty on a normal page.
+      // Non-empty means those fonts lost ligatures — the page is correct but
+      // plainer, and this is the breadcrumb that says which font to replace.
+      unshapedFonts: [...fontCache.values()]
+        .filter((entry) => !entry.canShape)
+        .map((entry) => entry.name),
       bubblesStamped: composites.length,
     },
     "Text stamped onto page",

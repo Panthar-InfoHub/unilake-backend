@@ -17,6 +17,7 @@ WORKDIR /app
 # but package.json didn't, Docker reuses the cached node_modules
 # instead of reinstalling everything — saves minutes on every rebuild.
 COPY package.json package-lock.json ./
+COPY patches ./patches
 RUN npm ci
 
 # Copy the rest of the source (src, prisma schema, config files, etc.)

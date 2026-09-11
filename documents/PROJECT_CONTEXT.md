@@ -100,7 +100,8 @@ Never assume a task is done just because it was discussed — check CURRENT_STAT
 | Pino | — | Logging | Signature: `logger.info(dataObject, 'message')` — data FIRST. Not Winston. |
 | Helmet, CORS | — | Security headers | CORS methods must include PATCH |
 | Sharp | 0.35.3 | Dimension probing + text compositing + JPEG transcode + WebP display derivative | Installed July 29. `src/lib/image.ts` holds `probeImageDimensions` and `buildDisplayImage`, but `generationWorker.ts` and `textStamp.ts` import `sharp` directly too — the lib is one of three entry points, not a wrapper around all Sharp use. Runs FIRST, before ComfyUI. **Sharp renders SVG through librsvg, which resolves fonts via fontconfig and silently ignores `@font-face` — see the text-rendering note in §4.** |
-| **opentype.js** | 2.0.0 (+ `@types/opentype.js` 1.3.x) | Glyph→path conversion for text stamping | Added Aug 24. Parses the comic's TTF/OTF/WOFF from R2 and emits SVG `<path>` outlines, so page rendering depends on no font being installed on the host. **Cannot parse WOFF2** (needs a Brotli decompressor it does not bundle) even though the upload validator accepts the extension. |
+| **opentype.js** | 2.0.0 (+ `@types/opentype.js` 1.3.x) | Glyph→path conversion for text stamping | Added Aug 24. Parses the comic's TTF/OTF/WOFF from R2 and emits SVG `<path>` outlines, so page rendering depends on no font being installed on the host. **Cannot parse WOFF2** (needs a Brotli decompressor it does not bundle) even though the upload validator accepts the extension. **PATCHED (Sep 10)** via `patch-package` — see §3a. |
+| **patch-package** | devDependency | Reapplies the opentype.js patch on every install | Added Sep 10. Runs via the `postinstall` script. |
 | react-konva | Recommended to frontend | Admin bubble-mapping UI | Chosen over Fabric/DOM for zoom+pan. Backend endpoints already built |
 | Python 3.11.9 (venv) | 3.11.9 | Photo validation (LEGACY — kept, not yet removed) | Cleanup deferred; code retained but no longer called |
 | OpenCV, MediaPipe, DeepFace, TensorFlow, tf-keras | — | Photo validation (LEGACY) | Kept for now |
@@ -182,6 +183,8 @@ app.use("/api/public", publicRouter);
   - Real glyph metrics also replaced three estimates: wrapping measures actual advance widths (was `fontSizePx * 0.6`), `fitTextToBox` now checks **width as well as height** so a single unbreakable word shrinks rather than spilling, and vertical centring uses the font's ascender/descender.
   - **Fail-loud by design.** Three conditions that used to render nothing now throw `ValidationError`: a bubble with dialogue but no font assigned, a font file that cannot be parsed (including WOFF2), and a font lacking glyphs for the text (checked via `charToGlyphIndex(char) === 0`). There is no fallback font — relying on one is the bug that was removed.
   - No user-supplied string reaches the SVG any more: path data is numeric and `fill` is a regex-validated hex, so `escapeXml()` was deleted along with the XML-injection surface.
+  - **opentype.js is patched so unsupported GSUB lookups are skipped, not thrown (Sep 10).** Measuring or drawing a string runs opentype.js's shaper, which applies the font's OpenType feature tables. It implements only a subset of the legal encodings and **throws** on the rest — a real uploaded font (Calistoga) hit `substitutionType : 62 lookupType: 6 - substFormat: 2 is not yet supported` and killed page generation outright, three BullMQ attempts per page. There is no option to disable this: the composition feature is registered unconditionally and queried under the `"delf"` (default) script, so no render option avoids it. The patch makes `FeatureQuery.getLookupMethod`'s `default:` branch return a no-op instead of throwing. Safe because `lookupFeature` only ever *invokes* the returned function for substitution types it handles (`11, 12, 21, 41, 51, 53, 63`) — an unsupported type's no-op is never called. Patch file lives in `patches/`, reapplied by `patch-package` on `postinstall`.
+  - **The SVG canvas is exactly the bubble box, so text wider than its box is silently CLIPPED — not overflowed.** `fitTextToBox` normally prevents this by shrinking, but when measurement and painting disagree for any reason, the excess glyphs are painted and then discarded with no error and no log. This is how a cover shipped reading "Pu" instead of "Pulkit". A no-clip fix (size the canvas to the text and shift the composite offset) is designed but **not implemented** — see `CURRENT_STATE.md`.
 - **Per-bubble text colour**: `Bubble.fontColor` is a 6-digit hex string used directly as the `<path>` `fill`. Default `#000000`. Baked into `textStampedUrl`/`finalImageUrl` at generation time — recolouring a bubble does **not** alter already-generated pages, only future generations.
 - **hasFace fork drives worker branching**: face pages need `bestPhotoUrl`, `maskUrl`, `pagePrompt` and go through RunPod. Non-face pages need only `artworkUrl` + dimensions and finish after text-stamp. `comfyJobId` stays null for non-face rows.
 - **ComfyUI transport**: text-stamped artwork + mask + child photo all travel as base64 in RunPod payload. Sharp transcodes all three to JPEG q88 right before submit (RunPod caps payload at 10 MiB; PNG at 2000×1455 would exceed). Result comes back as base64 in polling response; decoded and saved to R2 as PNG. Single face-swap LoRA baked in Docker — no per-comic asset sync.
@@ -517,6 +520,8 @@ unilake-backend/
 │ ├── schema.prisma
 │ └── migrations/
 ├── prisma.config.ts # Reads DIRECT_URL from process.env directly
+├── patches/ # patch-package output. MUST be COPYed before `npm ci` in Dockerfile.
+│ └── opentype.js+2.0.0.patch # Skip unsupported GSUB lookups instead of throwing
 ├── requirements.txt # LEGACY — kept for now
 ├── venv/ # LEGACY — kept for now
 ├── src/
@@ -603,7 +608,9 @@ unilake-backend/
 Raising `drainDelay` / `stalledInterval` and not running the stub Shiprocket worker are still worth doing as ordinary efficiency, but they are no longer load-bearing.
 
 **Tooling notes:**
-- `package.json` has only `dev` and `start` scripts. No test, lint, build, or typecheck command exists for a pipeline to run.
+- `package.json` has `dev`, `start`, and (added Sep 10) `postinstall: patch-package`. No test, lint, build, or typecheck command exists for a pipeline to run.
+- **The Dockerfile must `COPY patches ./patches` BEFORE `RUN npm ci`.** `npm ci` runs `postinstall`, so if `patches/` has not been copied yet, `patch-package` finds nothing, exits 0, and production silently runs the *unpatched* opentype.js while local works fine. The `COPY . .` further down is too late.
+- If `npm ci` ever gains `--omit=dev`, move `patch-package` into `dependencies` or the build breaks.
 - `winston` is listed in `dependencies` and imported by nothing. **⚠️ CONTRADICTORY:** `DECISIONS.md` lists Winston as a never-do with Pino chosen instead.
 - `prettier` sits in `dependencies` rather than `devDependencies`; `ts-node-dev` is installed but unused (tsx replaced it); `"main"` points at `server.ts` instead of `src/server.ts`; there is no `engines` field pinning Node 22.
 

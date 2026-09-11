@@ -465,9 +465,32 @@
 
 ---
 
+## Font shaping & bubble layout (added Sep 10–11)
+
+- **opentype.js is patched to SKIP unsupported GSUB lookups, not throw.** A library gap must degrade a glyph, not kill a page — the unpatched `default:` branch took down generation for three BullMQ attempts per page.
+- **Safe because `lookupFeature` only invokes the returned function for types it handles** (`11, 12, 21, 41, 51, 53, 63`); an unsupported type's no-op is never called.
+- **Never try to disable `ccmp` via render options** — the feature is registered unconditionally and queried under the `"delf"` (default) script; no option reaches it. Patching is the only route.
+- **`patches/` MUST be COPYed before `npm ci` in the Dockerfile.** Otherwise `postinstall` finds nothing, exits 0, and production silently runs unpatched while local works.
+- **Never verify a font fix only against a font downloaded from upstream.** The deployed file is whatever the admin uploaded and may differ; test the actual artefact.
+- **Layout diagnostics log at `info`, not `debug`.** The logger runs at `info` whenever `NODE_ENV=production`, so a debug line is invisible in exactly the environment where a bad render is most expensive to reproduce.
+- **Never diagnose a render bug by inferring geometry from output pixels when a log line would state it.** Three wrong diagnoses this session; one log line settled it in one generation.
+- **`fitTextToBox` must check width as well as height, and admins must size bubbles to the text.** The SVG canvas is the bubble box, so anything wider is destroyed, not overflowed.
+
+## Frontend preloader (added Sep 11)
+
+- **The preloader is a deliberate fixed ~55 s stall, not a progress measurement.** Generation already runs underneath it (the preview page's hooks fire regardless of what it renders); the stall buys the pipeline a head start.
+- **It does not end early when pages are ready** — predictable pacing beats a variable wait.
+- **Real errors break through it immediately** (expired / no preview pages / FAILED / no snapshot). Holding someone 55 s to then say it failed wastes their time.
+- **Progress bar is a CSS keyframe animation, never a JS interval.** An interval can move backwards and did; a keyframe cannot, costs zero re-renders, and always starts from `from`.
+- **Never drive a mount animation with a CSS transition flipped from an effect** — it only animates if the browser painted the start value in an earlier frame; when it doesn't, the bar snaps to full. Use `@keyframes`.
+- **Callbacks passed to a timer-owning child go through a ref, not effect deps.** The parent passes an inline arrow and re-renders constantly (TanStack polls, WS events); depending on it restarted the timer every time. Fixing it in the parent instead would silently regress on the next edit.
+
+---
+
 ## SUPERSEDED
 
 Entries replaced in place; kept as one-liners so the old shape isn't re-proposed.
 
 - **(Aug 24 · s2) "Font embedded as base64 `@font-face` data URI" in the Sharp text-stamping design** — never worked; librsvg discards the rule. Replaced by glyph outlines via opentype.js.
 - **(Aug 24 · s2) "`avgCharWidthPx = fontSizePx * 0.6`, rough but adequate for MVP"** — replaced by real advance widths, which also revealed that bubble width was never being checked at all.
+- **(Sep 10) "Fall back to per-glyph layout when a font cannot be shaped"** — built and verified, then made unreachable the same session by patching opentype.js so every font shapes. Code still present in `textStamp.ts`; scheduled for deletion.
