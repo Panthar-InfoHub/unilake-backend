@@ -422,6 +422,7 @@ model Order {
   shiprocketShipmentId String?
   courierId            Int?
   isInternational      Boolean   @default(false)
+  trackingUrl         String?
 
   // Real package dimensions (admin-entered at packaging)
   finalLength  Float?

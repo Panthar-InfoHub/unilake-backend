@@ -163,6 +163,8 @@ import {
   toggleBlogStatusHandler,
   updateBlogHandler,
 } from "../controllers/blog.controller.js";
+import { listAdminOrdersHandler, getAdminOrderDetailHandler, confirmDimensionsHandler, retryShiprocketHandler, getOrderLabelHandler,  refreshTrackingHandler} from "../controllers/order.controller.js";
+import { confirmDimensionsBodySchema } from "../validators/order.schema.js";
 
 const router = Router();
 
@@ -388,6 +390,21 @@ router.patch("/blogs/:id", validateBody(updateBlogSchema), updateBlogHandler);
 router.patch("/blogs/:id/status", toggleBlogStatusHandler);
 router.delete("/blogs/:id", deleteBlogHandler);
 
+
+// ORDERS (Section 7 — Shiprocket admin)
+// Route ordering note: literal paths (/orders/failed) will be registered
+// ABOVE /orders/:orderId when we get to endpoint 8. Follow that rule.
+router.get("/orders", listAdminOrdersHandler);
+router.get("/orders/:orderId", getAdminOrderDetailHandler);
+router.get("/orders/:orderId/label", getOrderLabelHandler);
+router.post(
+  "/orders/:orderId/confirm-dimensions",
+  validateBody(confirmDimensionsBodySchema),
+  confirmDimensionsHandler
+);
+router.post("/orders/:orderId/retry-shiprocket", retryShiprocketHandler);
+router.post("/orders/:orderId/refresh-tracking", refreshTrackingHandler);
+
 // feedback
 router.get("/feedbacks", getAllFeedbacksHandler);
 router.patch(
@@ -396,5 +413,6 @@ router.patch(
   updateFeedbackStatusHandler
 );
 router.delete("/feedbacks/:id", deleteFeedbackHandler);
+
 
 export default router;

@@ -29,6 +29,7 @@ import { submitAndAwaitResult } from "./sd/runpodClient.js";
 import { acquirePhoto, releasePhoto } from "./sd/photoCache.js";
 import { buildDisplayImage } from "../../lib/image.js";
 import sharp from "sharp";
+import { notifyGenerationSuccess } from "../../services/notification.service.js";
 
 type GeneratePageJobData = {
   pageVersionId: string;
@@ -572,8 +573,12 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
         "[SD Worker] All paid pages done — session marked PAID_PAGES_READY, Order marked GENERATED"
       );
       emitSessionPaidReady(sessionId);
-      // TODO: notify user — send "your comic is ready" email once the
-      // notification layer exists.
+      notifyGenerationSuccess(sessionId).catch((err) => {
+        logger.error(
+          { sessionId, err },
+          "[SD Worker] notifyGenerationSuccess failed (swallowed)"
+        );
+      });
     }
     
     logger.info(
@@ -713,7 +718,12 @@ generationWorker.on("failed", async (job, err) => {
         "[SD Worker] Session marked PAID_PAGES_READY from failure handler (last page failed but earlier pages covered the total)"
       );
       emitSessionPaidReady(pageVersion.orderSessionId);
-      // TODO: notify user — same "your comic is ready" email as the success path.
+      notifyGenerationSuccess(pageVersion.orderSessionId).catch((err) => {
+        logger.error(
+          { sessionId: pageVersion.orderSessionId, err },
+          "[SD Worker] notifyGenerationSuccess failed (swallowed)"
+        );
+      });
     }
   } catch (handlerErr) {
     // A crash inside the terminal-failure handler must not itself crash the

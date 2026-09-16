@@ -29,6 +29,9 @@ const requriedVariables = [
   "SHIPROCKET_PASSWORD",
   "SHIPROCKET_PICKUP_LOCATION_NAME",
   "SHIPROCKET_WEBHOOK_TOKEN",
+  "RESEND_API_KEY",
+  "EMAIL_FROM_ADDRESS",
+  "EMAIL_FROM_NAME",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -76,5 +79,10 @@ export const config = {
     password: process.env.SHIPROCKET_PASSWORD!,
     pickupLocationName: process.env.SHIPROCKET_PICKUP_LOCATION_NAME!,
     webhookToken: process.env.SHIPROCKET_WEBHOOK_TOKEN!,
+  },
+  email: {
+    resendApiKey: process.env.RESEND_API_KEY!,
+    fromAddress: process.env.EMAIL_FROM_ADDRESS!,
+    fromName: process.env.EMAIL_FROM_NAME!,
   },
 };

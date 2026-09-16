@@ -42,3 +42,57 @@ export const SHIPROCKET_STATUS_MAP: Record<string, OrderStatus> = {
   "RTO DELIVERED": "SHIPROCKET_FAILED",
   LOST: "SHIPROCKET_FAILED",
 };
+
+// ============================================================
+// PUBLIC ORDER STATUS — internal enum → customer-facing shape
+// ============================================================
+//
+// The customer-facing tracking endpoint (Section 6) never exposes the raw
+// OrderStatus enum or the raw Shiprocket `trackingStatus` string. Both are
+// admin-only. Instead, we return { code, label }:
+//   - `code` is a stable machine-readable string the frontend switches on.
+//   - `label` is the human string shown to the customer.
+//
+// Deliberate collapses:
+//   - PAID and GENERATED both show "Preparing your book" — the customer
+//     doesn't care which internal stage we're in.
+//   - CONFIRMED, READY_TO_SHIP, and SHIPROCKET_FAILED all show
+//     "Getting ready to ship". Backend failure is admin's problem, not
+//     the customer's — they see the same neutral message while admin
+//     recovers via the SHIPROCKET_FAILED queue (Section 7).
+//
+// The switch is deliberately exhaustive: adding a new OrderStatus value
+// without updating this function will fail typecheck.
+
+export type PublicOrderStatusCode =
+  | "AWAITING_PAYMENT"
+  | "PREPARING"
+  | "PROCESSING"
+  | "SHIPPED"
+  | "DELIVERED"
+  | "CANCELLED";
+
+export type PublicOrderStatus = {
+  code: PublicOrderStatusCode;
+  label: string;
+};
+
+export function toPublicStatus(status: OrderStatus): PublicOrderStatus {
+  switch (status) {
+    case "CREATED":
+      return { code: "AWAITING_PAYMENT", label: "Awaiting payment" };
+    case "PAID":
+    case "GENERATED":
+      return { code: "PREPARING", label: "Preparing your book" };
+    case "CONFIRMED":
+    case "READY_TO_SHIP":
+    case "SHIPROCKET_FAILED":
+      return { code: "PROCESSING", label: "Getting ready to ship" };
+    case "SHIPPED":
+      return { code: "SHIPPED", label: "On the way" };
+    case "DELIVERED":
+      return { code: "DELIVERED", label: "Delivered" };
+    case "CANCELLED":
+      return { code: "CANCELLED", label: "Cancelled" };
+  }
+}
