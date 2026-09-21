@@ -38,14 +38,33 @@ type GeneratePageJobData = {
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
 /**
- * Best-effort cleanup on failure: mark row FAILED with a human-readable
- * error message. Failures inside this function are logged, never thrown —
- * we're already inside a catch block; a nested throw would mask the
- * original error.
+ * Best-effort cleanup on failure. Failures inside this function are logged,
+ * never thrown — we're already inside a catch block; a nested throw would mask
+ * the original error.
+ *
+ * `status: FAILED` is written ONLY on the final attempt. While BullMQ still has
+ * retries left the row keeps whatever non-terminal status it held when it threw
+ * (TEXT_STAMPING / GENERATING_SD / QUEUED), which is the truth: a retry is
+ * pending and the page is still being worked on. Only the error message is
+ * recorded in the meantime, so the cause of a mid-retry failure is not lost.
+ *
+ * This is what makes FAILED trustworthy downstream:
+ *   - `GET /sessions/:id` only reports FAILED when the page has genuinely given
+ *     up, so a client can render a terminal error without waiting on a socket
+ *     event, and it survives a refresh.
+ *   - `maybeMarkPreviewComplete` counts FAILED as terminal. Writing it on every
+ *     attempt meant a concurrent page finishing mid-retry could see a FAILED
+ *     row, conclude every page had settled, and flip the session to
+ *     PREVIEW_READY while attempt 2 was still running.
+ *
+ * Trade-off: if the worker process dies between attempts the row is left
+ * non-terminal rather than FAILED. Same shape as the orphaned QUEUED rows that
+ * `enqueuePreviewGenerationJobs` already recovers from on re-generate.
  */
 async function markPageVersionFailed(
   pageVersionId: string,
-  err: unknown
+  err: unknown,
+  isFinal: boolean
 ): Promise<string> {
   const rawMessage = err instanceof Error ? err.message : String(err);
   const errorMessage = rawMessage.substring(0, MAX_ERROR_MESSAGE_LENGTH);
@@ -53,15 +72,12 @@ async function markPageVersionFailed(
   try {
     await prisma.pageVersion.update({
       where: { id: pageVersionId },
-      data: {
-        status: "FAILED",
-        errorMessage,
-      },
+      data: isFinal ? { status: "FAILED", errorMessage } : { errorMessage },
     });
   } catch (dbErr) {
     logger.error(
-      { pageVersionId, dbErr },
-      "[SD Worker] Failed to mark PageVersion FAILED — leaving in prior status"
+      { pageVersionId, isFinal, dbErr },
+      "[SD Worker] Failed to record PageVersion failure — leaving in prior status"
     );
   }
 
@@ -606,12 +622,20 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
       "[SD Worker] Pipeline failed"
     );
 
-    const errorMessage = await markPageVersionFailed(pageVersionId, err);
+    // Inside processJob, `attemptsMade` is the count BEFORE this attempt — 0 on
+    // the first run, which is why the log above reads `attemptsMade + 1`. The
+    // `failed` handler below compares the un-incremented value instead, because
+    // BullMQ has already bumped it by the time that event fires. Both are
+    // correct in their own scope; do not unify them.
+    const isFinal = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+
+    const errorMessage = await markPageVersionFailed(pageVersionId, err, isFinal);
 
     emitPageError(sessionId, {
       pageNumber: page.pageNumber,
       variantIndex: pageVersion.variantIndex,
       errorMessage,
+      isFinal,
     });
 
     throw err;

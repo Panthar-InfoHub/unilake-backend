@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { deleteFile, getPublicUrl, getSignedUploadUrl } from "../lib/r2.js";
+import {
+  deleteFile,
+  getKeyFromPublicUrl,
+  getPublicUrl,
+  getSignedUploadUrl,
+} from "../lib/r2.js";
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { config } from "../config/env.js";
@@ -12,6 +17,7 @@ import type {
   AdminComicFilterQueryInput,
   ComicFilterQueryInput,
   CreateComicInput,
+  GetComicVideoUploadUrlInput,
   GetLoraUploadUrlInput,
   UpdateComicPricingInput,
   UpdateComicStatusInput,
@@ -59,6 +65,42 @@ export const generateThumbnailUploadUrl = async (
   return { uploadUrl, key };
 };
 
+// Longer than the 15-minute thumbnail window: the admin UI caps videos at 100 MB
+// and that can take a while to PUT on a slow connection. The URL only authorizes
+// a single write to one UUID key, so a longer window costs nothing.
+const COMIC_VIDEO_UPLOAD_EXPIRY_SECONDS = 30 * 60;
+
+/**
+ * Presigned PUT for a comic's optional promo video.
+ *
+ * Comic-agnostic by design, exactly like the thumbnail and LoRA equivalents:
+ * the key is UUID-based, so no comicId is needed to issue it and nothing is
+ * written to the DB here. The comic only learns about the file when the admin
+ * PATCHes the returned key back as `videoKey`.
+ */
+export const generateComicVideoUploadUrl = async (
+  fileName: GetComicVideoUploadUrlInput["fileName"],
+  contentType: GetComicVideoUploadUrlInput["contentType"]
+) => {
+  const safeFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, "_");
+
+  const key = `comics/videos/${randomUUID()}-${safeFileName}`;
+
+  logger.info(
+    { key, contentType },
+    "Requesting presigned URL for comic preview video"
+  );
+
+  const uploadUrl = await getSignedUploadUrl(
+    "public",
+    key,
+    contentType,
+    COMIC_VIDEO_UPLOAD_EXPIRY_SECONDS
+  );
+
+  return { uploadUrl, key };
+};
+
 export const createComic = async (data: CreateComicInput) => {
   try {
     logger.info(
@@ -89,6 +131,7 @@ export const createComic = async (data: CreateComicInput) => {
           comicId: comic.id,
           countryId: p.countryId,
           coverType: p.coverType,
+          mrp: p.mrp,
           price: p.price,
         })),
       });
@@ -143,7 +186,30 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
       const removedUrls = comic.coverThumbnailUrls.filter((u) => !newUrls.includes(u));
       oldR2KeysToDelete = removedUrls.map((u) => u.replace(`${publicBase}/`, ""));
     }
+    if (data.videoKey !== undefined) {
+      // Scalar, so the contract is simpler than thumbnailKeys': omitted means
+      // unchanged, a key means replace, null means remove. It is never asked to
+      // accept a URL the client is re-sending to keep, which is why this skips
+      // normalizeThumbnailInput — that helper exists only for the array's
+      // send-back-what-you-keep semantics.
+      const newVideoUrl =
+        data.videoKey === null ? null : getPublicUrl(data.videoKey);
+      updateData.previewVideoUrl = newVideoUrl;
+
+      // The old≠new guard is load-bearing, not defensive: without it, saving the
+      // same key twice would delete the very file the row still points at.
+      // getKeyFromPublicUrl is safe here because its input is always a URL this
+      // service wrote, never untrusted client input.
+      if (comic.previewVideoUrl && comic.previewVideoUrl !== newVideoUrl) {
+        oldR2KeysToDelete.push(getKeyFromPublicUrl(comic.previewVideoUrl));
+      }
+    }
     if (data.description !== undefined) updateData.description = data.description;
+    // `!== undefined` rather than truthiness, so an explicit null clears the
+    // override and the page falls back to title/description again.
+    if (data.metaTitle !== undefined) updateData.metaTitle = data.metaTitle;
+    if (data.metaDescription !== undefined)
+      updateData.metaDescription = data.metaDescription;
     if (data.themeId !== undefined) updateData.theme = { connect: { id: data.themeId } };
     if (data.ageGroup !== undefined) updateData.ageGroup = data.ageGroup;
     if (data.isBestseller !== undefined) updateData.isBestseller = data.isBestseller;
@@ -227,6 +293,12 @@ export async function deleteComic(comicId: string) {
       .filter((url): url is string => Boolean(url))
       .map((url) => url.replace(`${publicBase}/`, ""))
   );
+  // The promo video is nullable and most comics have none, so this is usually
+  // empty. It still has to be swept: a video can be ~100 MB, and nothing else
+  // in the system would ever reference it again once the comic row is gone.
+  const videoKeys = comic.previewVideoUrl
+    ? [comic.previewVideoUrl.replace(`${publicBase}/`, "")]
+    : [];
 
   // DB delete is the moment of truth. If it throws, we haven't touched R2 —
   // caller sees an error and the comic + all its assets stay intact, exactly
@@ -260,8 +332,25 @@ export async function deleteComic(comicId: string) {
     }
   }
 
+  for (const key of videoKeys) {
+    try {
+      await deleteFile("public", key);
+      logger.info({ comicId, key }, "Deleted comic preview video from R2");
+    } catch (error) {
+      logger.warn(
+        { error, comicId, key },
+        "Failed to delete comic preview video from R2 after DB delete — orphaned file"
+      );
+    }
+  }
+
   logger.info(
-    { comicId, thumbnailCount: thumbnailKeys.length, pageAssetCount: pageAssetKeys.length },
+    {
+      comicId,
+      thumbnailCount: thumbnailKeys.length,
+      pageAssetCount: pageAssetKeys.length,
+      videoCount: videoKeys.length,
+    },
     "Comic deleted (pages + bubbles cascade-deleted, R2 assets swept)"
   );
 }
@@ -294,6 +383,7 @@ export const updateComicPricing = async (
           comicId,
           countryId: p.countryId,
           coverType: p.coverType,
+          mrp: p.mrp,
           price: p.price,
         })),
       });
@@ -447,6 +537,7 @@ export const getPublicComicsList = async (filters: ComicFilterQueryInput) => {
       },
       pricingRules: {
         select: {
+          mrp: true,
           price: true,
           coverType: true,
           country: {
@@ -480,6 +571,29 @@ export const getPublicComicDetails = async (comicId: string) => {
       pageCount: true,
       freePreviewPages: true,
       coverThumbnailUrls: true,
+      // Optional. Null for most comics — the carousel renders images only then.
+      // Deliberately NOT added to getPublicComicsList: the video is a
+      // detail-page asset and catalogue payloads should not carry it.
+      previewVideoUrl: true,
+      // SEO overrides. Null on most comics — the page then falls back to
+      // `title` / `description`, which are already selected above.
+      metaTitle: true,
+      metaDescription: true,
+      // Rotating lines for the generation screens. Active only — a fact the
+      // admin switched off must not reach the browser at all, since ordering is
+      // decided client-side and anything sent could be displayed.
+      //
+      // Ships on this endpoint rather than a dedicated one because the preview
+      // page already fetches this comic, so the facts cost no extra request.
+      facts: {
+        where: { isActive: true },
+        select: {
+          id: true,
+          placement: true,
+          text: true,
+        },
+        orderBy: { createdAt: "asc" },
+      },
       theme: {
         select: {
           id: true,
@@ -489,6 +603,7 @@ export const getPublicComicDetails = async (comicId: string) => {
       pricingRules: {
         select: {
           coverType: true,
+          mrp: true,
           price: true,
           country: {
             select: {

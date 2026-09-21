@@ -43,6 +43,45 @@ export const SHIPROCKET_STATUS_MAP: Record<string, OrderStatus> = {
   LOST: "SHIPROCKET_FAILED",
 };
 
+// ⚠️⚠️ DO NOT IMPORT ANYTHING BELOW THIS LINE — DUPLICATE, AND IT IS THE WRONG
+//        ONE. (flagged Sep 21, 2026)
+//
+// `PublicOrderStatusCode`, `PublicOrderStatus` and `toPublicStatus` are ALSO
+// defined in `src/utils/orderStatusMapping.ts`. That file is the canonical
+// copy — it is what `order.service.ts` imports, and it is what customers
+// actually see today.
+//
+// The two copies DISAGREE. Same input, different output:
+//
+//   status      | orderStatusMapping.ts (correct)     | this file (wrong)
+//   ------------|------------------------------------|---------------------------
+//   GENERATED   | AWAITING_SELECTION                 | PREPARING
+//               | "Awaiting your selection"          | "Preparing your book"
+//   PAID        | "Comic being created"              | "Preparing your book"
+//   CONFIRMED   | "Printing"                         | "Getting ready to ship"
+//
+// The GENERATED row is the one that matters. It means every paid page is done
+// and the book is waiting on the CUSTOMER to pick variants and send to print —
+// nothing is happening server-side. The canonical copy gives it its own code so
+// the UI can prompt them. This copy collapses it into PREPARING, which tells the
+// customer to sit tight and wait for us. That is the opposite instruction, and
+// an order in that state would never move.
+//
+// NOTHING IS BROKEN RIGHT NOW: only `order.service.ts` calls this function and
+// it imports the correct copy, so everything below is dead code. The danger is
+// the next call site. Someone working on shipping opens this file, finds
+// `toPublicStatus` sitting right here, and imports it. It typechecks, it boots,
+// it returns a valid-looking object — and customers silently get wrong wording
+// with nothing anywhere reporting a problem.
+//
+// This is the same failure shape as the `assertNotExpired` duplication that
+// reached production on Aug 22: two copies of one function, quietly disagreeing,
+// and which one you got depended on which file you imported from.
+//
+// FIX: delete this whole block (the two types + the function). Nothing imports
+// it. Left in place for now only because removing it was outside the scope of
+// the change that found it.
+//
 // ============================================================
 // PUBLIC ORDER STATUS — internal enum → customer-facing shape
 // ============================================================

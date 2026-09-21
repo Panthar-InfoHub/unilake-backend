@@ -63,6 +63,9 @@ import type {
   Bubble,
   Font,
   PronounKey,
+  TextAlign,
+  TextVerticalAlign,
+  TextCase,
 } from "../../../generated/prisma/client.js";
 
 type BubbleWithFont = Bubble & { font: Font | null };
@@ -288,6 +291,27 @@ function assertGlyphCoverage(font: opentype.Font, text: string, fontName: string
  * Routes on `canShape` so that measurement always matches what buildLinePathData
  * will actually paint — see the note on LoadedFont.
  */
+/**
+ * Apply a bubble's casing to its fully-substituted dialogue.
+ *
+ * Deliberately locale-independent (`toUpperCase`, not `toLocaleUpperCase`): the
+ * server has no notion of the reader's locale, and a locale-aware transform
+ * would make the same comic render differently depending on the host's
+ * environment — the exact class of "works locally, wrong in the container" bug
+ * this module was rewritten to eliminate.
+ */
+function applyTextCase(text: string, textCase: TextCase): string {
+  switch (textCase) {
+    case "UPPERCASE":
+      return text.toUpperCase();
+    case "LOWERCASE":
+      return text.toLowerCase();
+    case "AS_TYPED":
+    default:
+      return text;
+  }
+}
+
 function measureWidth(loaded: LoadedFont, text: string, fontSizePx: number): number {
   return loaded.canShape
     ? loaded.font.getAdvanceWidth(text, fontSizePx)
@@ -478,11 +502,15 @@ type BubbleSvgInputs = {
   loaded: LoadedFont;
   /** Bubble.fontColor — a validated 6-digit hex string, e.g. "#1a1a1a". */
   fill: string;
+  /** Bubble.textAlign — horizontal placement of each line within the box. */
+  align: TextAlign;
+  /** Bubble.textVerticalAlign — placement of the whole line block in the box. */
+  verticalAlign: TextVerticalAlign;
 };
 
 /**
- * Render the wrapped lines as a single <path> of glyph outlines, centred both
- * horizontally and vertically inside the bubble box.
+ * Render the wrapped lines as a single <path> of glyph outlines, placed inside
+ * the bubble box according to the bubble's horizontal and vertical alignment.
  *
  * There is no <text>, no font-family and no @font-face here by design — the
  * output depends on nothing installed on the host. Note also that no
@@ -492,22 +520,45 @@ type BubbleSvgInputs = {
  * XML-escaping hazard that used to require escapeXml() is gone entirely.
  */
 function buildBubbleSvg(inputs: BubbleSvgInputs): string {
-  const { widthPx, heightPx, lines, fontSizePx, loaded, fill } = inputs;
+  const {
+    widthPx,
+    heightPx,
+    lines,
+    fontSizePx,
+    loaded,
+    fill,
+    align,
+    verticalAlign,
+  } = inputs;
   const { lineHeightPx, ascenderPx, leadingPx } = lineMetrics(
     loaded.font,
     fontSizePx,
   );
 
-  // Centre the block of lines vertically, then drop to the first baseline.
+  // Place the block of lines vertically, then drop to the first baseline.
+  // MIDDLE reproduces the old unconditional behaviour exactly.
   const blockHeightPx = lines.length * lineHeightPx;
-  const blockTopPx = (heightPx - blockHeightPx) / 2;
+  const blockTopPx =
+    verticalAlign === "TOP"
+      ? 0
+      : verticalAlign === "BOTTOM"
+        ? heightPx - blockHeightPx
+        : (heightPx - blockHeightPx) / 2;
   const firstBaselineY = blockTopPx + leadingPx / 2 + ascenderPx;
 
-  // Each line is centred on its own measured width — <path> has no text-anchor.
+  // Each line is placed on its own measured width — <path> has no text-anchor,
+  // so horizontal alignment is arithmetic we do per line rather than an
+  // attribute. Doing it per line (not once for the widest) is what gives a
+  // left-aligned paragraph a straight left edge.
   const pathData = lines
     .map((line, index) => {
       const lineWidthPx = measureWidth(loaded, line, fontSizePx);
-      const x = (widthPx - lineWidthPx) / 2;
+      const x =
+        align === "LEFT"
+          ? 0
+          : align === "RIGHT"
+            ? widthPx - lineWidthPx
+            : (widthPx - lineWidthPx) / 2;
       const baselineY = firstBaselineY + index * lineHeightPx;
 
       return buildLinePathData(loaded, line, x, baselineY, fontSizePx);
@@ -585,8 +636,20 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
   const composites: OverlayOptions[] = [];
 
   for (const bubble of bubbles) {
-    // 1. Substitute tokens
-    const finalText = substituteTokens(bubble.dialogue, childName, pronounKey).trim();
+    // 1. Substitute tokens, then apply the bubble's casing.
+    //
+    // Order matters and this is the only correct place for it. Everything
+    // downstream — the glyph-coverage guard, the width measurements that drive
+    // wrapping, and the shrink loop that fits the text to its box — has to see
+    // the exact characters that will be drawn. Casing anywhere later would
+    // verify and measure one string while painting another.
+    //
+    // The transform covers the substituted child name too: "keep this bubble in
+    // caps" means the whole line, not everything except the name.
+    const finalText = applyTextCase(
+      substituteTokens(bubble.dialogue, childName, pronounKey).trim(),
+      bubble.textCase,
+    );
 
     // Nothing to draw. A whitespace-only bubble is not an error — skip it.
     if (finalText.length === 0) continue;
@@ -680,6 +743,13 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
           fontSize: bubble.fontSize,
         },
 
+        // Placement and casing. Logged because they change both what is drawn
+        // and how wide it measures — UPPERCASE in particular runs wider and can
+        // push measuredWidthPx past boxWidthPx, which is the clip condition.
+        textAlign: bubble.textAlign,
+        textVerticalAlign: bubble.textVerticalAlign,
+        textCase: bubble.textCase,
+
         // Resolved pixel geometry — boxWidthPx IS the SVG canvas width
         xPx,
         yPx,
@@ -708,6 +778,8 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
       fontSizePx,
       loaded,
       fill: bubble.fontColor,
+      align: bubble.textAlign,
+      verticalAlign: bubble.textVerticalAlign,
     });
 
     composites.push({

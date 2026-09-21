@@ -11,6 +11,7 @@ import {
   updateComicPricingHandler,
   updateComicStatusHandler,
   getThumbnailUploadUrlsBatchHandler,
+  getComicVideoUploadUrlHandler,
 } from "../controllers/comic.controller.js";
 import {
   createCountryHandler,
@@ -22,6 +23,7 @@ import {
 import { validateBody } from "../middlewares/validateBody.js";
 import {
   createComicSchema,
+  getComicVideoUploadUrlSchema,
   getLoraUploadUrlSchema,
   updateComicPricingSchema,
   updateComicSchema,
@@ -31,7 +33,8 @@ import {
   createPageSchema,
   getPageArtworkUploadUrlSchema,
   updatePageSchema,
-  reorderPagesSchema
+  reorderPagesSchema,
+  previewPageStampSchema
 } from "../validators/page.schema.js";
 import {
   createPageHandler,
@@ -39,7 +42,8 @@ import {
   listComicPagesHandler,
   updatePageHandler,
   deletePageHandler,
-  reorderPagesHandler
+  reorderPagesHandler,
+  previewPageStampHandler
 } from "../controllers/page.controller.js";
 import {
   createBubbleSchema,
@@ -165,6 +169,47 @@ import {
 } from "../controllers/blog.controller.js";
 import { listAdminOrdersHandler, getAdminOrderDetailHandler, confirmDimensionsHandler, retryShiprocketHandler, getOrderLabelHandler,  refreshTrackingHandler} from "../controllers/order.controller.js";
 import { confirmDimensionsBodySchema } from "../validators/order.schema.js";
+import {
+  getAdminSitePageHandler,
+  getAdminSitePagesHandler,
+  toggleSitePageStatusHandler,
+  upsertSitePageHandler,
+} from "../controllers/sitePage.controller.js";
+import { upsertSitePageSchema } from "../validators/sitePage.schema.js";
+import {
+  getAdminSiteSettingHandler,
+  updateSiteSettingHandler,
+} from "../controllers/siteSetting.controller.js";
+import { updateSiteSettingSchema } from "../validators/siteSetting.schema.js";
+import {
+  createGoogleReviewHandler,
+  deleteGoogleReviewHandler,
+  getAllGoogleReviewsHandler,
+  getGoogleReviewUploadUrlHandler,
+  toggleGoogleReviewStatusHandler,
+  updateGoogleReviewHandler,
+} from "../controllers/googleReview.controller.js";
+import {
+  createGoogleReviewSchema,
+  getGoogleReviewUploadUrlSchema,
+  updateGoogleReviewSchema,
+} from "../validators/googleReview.schema.js";
+import {
+  createComicFactHandler,
+  deleteComicFactHandler,
+  listComicFactsHandler,
+  toggleComicFactStatusHandler,
+  updateComicFactHandler,
+} from "../controllers/comicFact.controller.js";
+import {
+  createComicFactSchema,
+  updateComicFactSchema,
+} from "../validators/comicFact.schema.js";
+import {
+  getContentHealthHandler,
+  getStatsSummaryHandler,
+  getStatsTimeseriesHandler,
+} from "../controllers/stats.controller.js";
 
 const router = Router();
 
@@ -176,6 +221,14 @@ router.get("/status", (req, res) => {
     adminEmail: req.user?.email,
   });
 });
+
+// OVERVIEW DASHBOARD STATS
+// Three endpoints, loaded independently by the overview page so the triage
+// band paints without waiting on the chart. All literal paths — no param route
+// lives under /stats, so there is no ordering hazard here.
+router.get("/stats/summary", getStatsSummaryHandler); // KPIs + pipeline + triage + recent + top comics
+router.get("/stats/timeseries", getStatsTimeseriesHandler); // chart series, IST buckets, zero-filled
+router.get("/stats/content-health", getContentHealthHandler); // storefront config state, no range
 
 // comic routes
 router.get("/comics", getAdminComicsHandler); // get the comic rotues
@@ -220,6 +273,16 @@ router.patch(
 ); // update page config
 router.delete("/pages/:pageId", deletePageHandler); // delete page (cascades bubbles)
 
+// Bubble-mapping preview. Renders the page's text stamping with a supplied name
+// and pronoun so the admin can see the real output while mapping — same
+// renderer the generation pipeline uses, no face swap, nothing persisted.
+// Bubbles travel in the body because the mapper holds unsaved edits locally.
+router.post(
+  "/pages/:pageId/preview-stamp",
+  validateBody(previewPageStampSchema),
+  previewPageStampHandler
+);
+
 router.patch(
   "/comics/:comicId/pages/reorder",
   validateBody(reorderPagesSchema),
@@ -252,6 +315,35 @@ router.patch(
 ); // update font name or file
 router.delete("/fonts/:fontId", deleteFontHandler); // delete font (blocks if bubbles reference it)
 
+// COMIC FACTS (rotating lines on the generation screens)
+// Create/list hang off the comic; edit/toggle/delete use a flat /facts/:factId,
+// matching how pages, bubbles and fonts are addressed in this file.
+// Purely decorative — nothing here affects publishing or generation.
+router.get("/comics/:comicId/facts", listComicFactsHandler); // ?placement= optional, includes inactive
+router.post(
+  "/comics/:comicId/facts",
+  validateBody(createComicFactSchema),
+  createComicFactHandler
+);
+router.patch(
+  "/facts/:factId",
+  validateBody(updateComicFactSchema),
+  updateComicFactHandler
+);
+router.patch("/facts/:factId/status", toggleComicFactStatusHandler);
+router.delete("/facts/:factId", deleteComicFactHandler);
+
+// COMIC PREVIEW VIDEO
+// Literal 2nd segment, so it can never be captured by /comics/:comicId/* —
+// those all require a literal 3rd segment (pages, fonts, pricing, status).
+// The saved key travels back through the unified PATCH /comics/:comicId as
+// `videoKey`; there is deliberately no separate save endpoint.
+router.post(
+  "/comics/video/upload-url",
+  validateBody(getComicVideoUploadUrlSchema),
+  getComicVideoUploadUrlHandler
+); // presigned upload URL for the optional carousel promo video
+
 // LORA
 router.post(
   "/comics/lora/upload-url",
@@ -264,7 +356,7 @@ router.post("/countries/upload-url", getFlagUploadUrlHandler); // to upload the 
 router.get("/countries", getAllCountriesHandler);
 router.post("/countries", createCountryHandler); // to post the new country
 router.put("/countries/:countryId", updateCountryHandler); // to update the existing country
-router.delete("/countries/:countryId", deleteCountryHandler); // delete country (blocks if pricing rules reference it)
+router.delete("/countries/:countryId", deleteCountryHandler); // delete country (cascades its pricing rules away, no guard)
 
 // theme routes :
 router.post("/themes", validateBody(createThemeSchema), createThemeHandler); // create
@@ -325,6 +417,28 @@ router.post(
 router.patch("/customer-reviews/:id/status", toggleCustomerReviewStatusHandler);
 router.delete("/customer-reviews/:id", deleteCustomerReviewHandler);
 router.get("/customer-reviews", getAllCustomerReviewsHandler);
+
+// google reviews — homepage "Excellent On Google" section
+// /upload-url stays ABOVE /:id: both are POST-adjacent param routes and
+// Express matches whichever is registered first.
+router.post(
+  "/google-reviews/upload-url",
+  validateBody(getGoogleReviewUploadUrlSchema),
+  getGoogleReviewUploadUrlHandler
+);
+router.get("/google-reviews", getAllGoogleReviewsHandler);
+router.post(
+  "/google-reviews",
+  validateBody(createGoogleReviewSchema),
+  createGoogleReviewHandler
+);
+router.patch(
+  "/google-reviews/:id",
+  validateBody(updateGoogleReviewSchema),
+  updateGoogleReviewHandler
+);
+router.patch("/google-reviews/:id/status", toggleGoogleReviewStatusHandler);
+router.delete("/google-reviews/:id", deleteGoogleReviewHandler);
 
 // team member's
 router.post(
@@ -404,6 +518,29 @@ router.post(
 );
 router.post("/orders/:orderId/retry-shiprocket", retryShiprocketHandler);
 router.post("/orders/:orderId/refresh-tracking", refreshTrackingHandler);
+
+// SITE PAGES (privacy / terms / refund)
+// No create or delete: the slug set is fixed by the SitePageSlug enum, so the
+// PUT upserts and that is the only way a row ever comes into existence.
+// isActive is owned solely by the /status route — saving never publishes.
+router.get("/site-pages", getAdminSitePagesHandler);
+router.get("/site-pages/:slug", getAdminSitePageHandler);
+router.put(
+  "/site-pages/:slug",
+  validateBody(upsertSitePageSchema),
+  upsertSitePageHandler
+);
+router.patch("/site-pages/:slug/status", toggleSitePageStatusHandler);
+
+// SITE SETTINGS (brand + contact details — singleton)
+// PATCH, not PUT: every field is optional and partial updates are the normal
+// case, matching /how-it-works.
+router.get("/site-settings", getAdminSiteSettingHandler);
+router.patch(
+  "/site-settings",
+  validateBody(updateSiteSettingSchema),
+  updateSiteSettingHandler
+);
 
 // feedback
 router.get("/feedbacks", getAllFeedbacksHandler);

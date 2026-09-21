@@ -10,6 +10,28 @@ import {
 import type { OrderSession } from "../generated/prisma/client.js";
 import { assertNotExpired } from "./session.service.js";
 
+/**
+ * Matches `@default("singleton")` on SiteSetting.id — the same fixed key
+ * siteSetting.service.ts uses. Duplicated as a local constant rather than
+ * imported so this module does not depend on a CMS service just to read one
+ * boolean.
+ */
+const SITE_SETTING_SINGLETON_ID = "singleton";
+
+/**
+ * Shown to the customer when the store is not accepting orders.
+ *
+ * This exact string is thrown as the error message, and the frontend's payment
+ * handler renders `error.message` directly as a toast — so editing it here
+ * changes what the customer reads, with no client change.
+ *
+ * ⚠️ The storefront banner in the frontend repo carries its own copy of this
+ * wording (OrdersPausedBanner). Two repos, so the duplication is unavoidable;
+ * change both together.
+ */
+const ORDERS_PAUSED_MESSAGE =
+  "We're not accepting orders right now — but feel free to preview any comic you like.";
+
 function assertShippingComplete(session: OrderSession): void {
   const required: (keyof OrderSession)[] = [
     "shippingName",
@@ -131,6 +153,42 @@ export async function initiateCheckout(sessionId: string) {
     throw new ConflictError(
       `An order already exists for this session with status ${session.order.status}. Cannot re-initiate checkout.`
     );
+  }
+
+  // 2b. STORE STATUS — are we accepting new orders at all?
+  //
+  // Placement is load-bearing. The block above ALWAYS returns (a resumable
+  // CREATED order) or throws (already paid), so everything below it is only
+  // reachable on a genuinely FRESH checkout. That is exactly the rule we want:
+  //
+  //   - already holding an unpaid Razorpay order  -> returned above, can finish
+  //   - starting checkout for the first time      -> blocked here
+  //
+  // Someone who had already opened the payment modal when the switch was
+  // flipped is not stranded mid-payment, and their Razorpay order expires on
+  // its own after 15 minutes either way. Moving this check any higher would
+  // break that for no gain.
+  //
+  // FAIL OPEN. `findUnique` returns null when no settings row has ever been
+  // saved, and null must mean "allowed" — it matches the column's own
+  // `@default(true)`, and a missing row silently closing the store is a far
+  // worse failure than the reverse.
+  //
+  // ConflictError (409) rather than a new 503 class: the message is what the
+  // customer sees. The frontend's payment handler already surfaces
+  // `error.message` as a toast, so no client change is needed for this to
+  // reach them.
+  const storeStatus = await prisma.siteSetting.findUnique({
+    where: { id: SITE_SETTING_SINGLETON_ID },
+    select: { acceptingOrders: true },
+  });
+
+  if (storeStatus && !storeStatus.acceptingOrders) {
+    logger.info(
+      { sessionId, comicId: session.comicId },
+      "Checkout blocked — store is not accepting orders"
+    );
+    throw new ConflictError(ORDERS_PAUSED_MESSAGE);
   }
 
   // 3. Status guard — only reachable when no Order row exists for this session.

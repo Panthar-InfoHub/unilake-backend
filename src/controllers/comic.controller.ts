@@ -16,7 +16,8 @@ import {
   getLoraUploadUrl,
   deleteComic,
   getAdminComicsList,
-  getAdminComicDetail
+  getAdminComicDetail,
+  generateComicVideoUploadUrl
 } from "../services/comic.service.js";
 import {
   adminComicFilterQuerySchema,
@@ -242,6 +243,27 @@ export const getLoraUploadUrlHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const result = await getLoraUploadUrl(req.body);
     sendSuccess(res, 200, result);
+  }
+);
+
+// req.body is validated by getComicVideoUploadUrlSchema on the route.
+export const getComicVideoUploadUrlHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { fileName, contentType } = req.body;
+
+    logger.debug(
+      { fileName, contentType },
+      "Incoming request for comic preview video upload URL"
+    );
+
+    const result = await generateComicVideoUploadUrl(fileName, contentType);
+
+    sendSuccess(
+      res,
+      200,
+      result,
+      "Presigned video upload URL generated successfully"
+    );
   }
 );
 

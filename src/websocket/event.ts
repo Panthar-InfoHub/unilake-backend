@@ -42,6 +42,15 @@ export function emitPageError(
     pageNumber: number;
     variantIndex: number;
     errorMessage: string;
+    /**
+     * False means BullMQ still has retries left for this page — the row is NOT
+     * terminal and the client must keep showing "generating". Only `true` means
+     * every attempt is spent and the page has genuinely given up.
+     *
+     * Emitted on every attempt rather than only the last so the non-final ones
+     * stay available for debugging; the flag is what carries the meaning.
+     */
+    isFinal: boolean;
   }
 ) {
   const sockets = getRoom(sessionId);

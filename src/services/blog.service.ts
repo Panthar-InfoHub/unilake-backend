@@ -68,6 +68,17 @@ async function generateUniqueSlug(title: string): Promise<string> {
   );
 }
 
+/**
+ * Presigned upload URL for both blog cover images and images embedded in the
+ * body by the rich-text editor.
+ *
+ * Returns `publicUrl` as well as the key because of the second case: a cover
+ * travels back as a key and is resolved server-side at save time, but an
+ * in-body image has to be written straight into the stored HTML as an absolute
+ * src, so the caller needs the resolved URL up front. Handing it over here
+ * keeps getPublicUrl() the single owner of that mapping — the alternative was
+ * exposing the R2 base to the frontend bundle.
+ */
 export async function getBlogUploadUrl(data: {
   fileName: string;
   contentType: string;
@@ -84,7 +95,7 @@ export async function getBlogUploadUrl(data: {
 
   logger.info({ key }, "Generated blog image upload URL");
 
-  return { uploadUrl, key };
+  return { uploadUrl, key, publicUrl: getPublicUrl(key) };
 }
 
 export async function createBlog(data: {
@@ -93,6 +104,8 @@ export async function createBlog(data: {
   body: string;
   coverImageKey?: string;
   tags?: string[];
+  metaTitle?: string;
+  metaDescription?: string;
 }) {
   const slug = await generateUniqueSlug(data.title);
 
@@ -106,6 +119,12 @@ export async function createBlog(data: {
         body: data.body,
         tags: data.tags ?? [],
         ...(data.excerpt !== undefined && { excerpt: data.excerpt }),
+        // Left unset when absent, so the column stays null and the post falls
+        // back to its own title/excerpt for search results.
+        ...(data.metaTitle !== undefined && { metaTitle: data.metaTitle }),
+        ...(data.metaDescription !== undefined && {
+          metaDescription: data.metaDescription,
+        }),
         ...(data.coverImageKey !== undefined && {
           coverImageUrl: getPublicUrl(data.coverImageKey),
         }),
@@ -136,6 +155,8 @@ export async function updateBlog(
     body?: string;
     coverImageKey?: string | null;
     tags?: string[];
+    metaTitle?: string | null;
+    metaDescription?: string | null;
   }
 ) {
   const existing = await prisma.blog.findUnique({ where: { id } });
@@ -153,6 +174,10 @@ export async function updateBlog(
   if (data.excerpt !== undefined) updateData.excerpt = data.excerpt;
   if (data.body !== undefined) updateData.body = data.body;
   if (data.tags !== undefined) updateData.tags = data.tags;
+  // Same null-clears-it rule as excerpt above.
+  if (data.metaTitle !== undefined) updateData.metaTitle = data.metaTitle;
+  if (data.metaDescription !== undefined)
+    updateData.metaDescription = data.metaDescription;
 
   // The slug is never touched here — it is frozen at create so that a title
   // edit can never 404 a link someone already shared.

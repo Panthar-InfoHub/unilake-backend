@@ -147,8 +147,11 @@ export const deleteCountryHandler = asyncHandler(
       throw new ValidationError("Country ID is required.");
     }
 
-    await deleteCountry(countryId);
+    const result = await deleteCountry(countryId);
 
-    res.status(204).send();
+    // 200 with the envelope, not a bare 204: the caller needs the cascade count
+    // to tell the admin what was actually destroyed, and this was the one
+    // country endpoint sitting outside the sendSuccess contract.
+    sendSuccess(res, 200, result, "Country deleted successfully.");
   }
 );

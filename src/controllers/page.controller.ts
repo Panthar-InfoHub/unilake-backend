@@ -9,10 +9,12 @@ import {
   updatePage,
   deletePage,
   reorderComicPages,
+  previewPageTextStamp,
 } from "../services/page.service.js";
 import {
   createPageSchema,
   getPageArtworkUploadUrlSchema,
+  type PreviewPageStampInput,
   type ReorderPagesInput,
 } from "../validators/page.schema.js";
 
@@ -101,5 +103,27 @@ export const reorderPagesHandler = asyncHandler(
     const pages = await reorderComicPages(comicId, orderedPageIds);
 
     sendSuccess(res, 200, pages, "Pages reordered successfully.");
+  }
+);
+
+// POST /api/admin/pages/:pageId/preview-stamp
+//
+// Renders the page's text stamping with a caller-supplied name and pronoun, so
+// the admin can see the real result while mapping bubbles. Text only — the face
+// swap is a separate stage and is not involved.
+export const previewPageStampHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { pageId } = req.params;
+
+    if (!pageId || typeof pageId !== "string") {
+      throw new ValidationError("pageId param is required");
+    }
+
+    const result = await previewPageTextStamp(
+      pageId,
+      req.body as PreviewPageStampInput
+    );
+
+    sendSuccess(res, 200, result);
   }
 );

@@ -239,6 +239,17 @@ export const getOrderSessionId = async (sessionId: string) => {
 
   // Fetch all pages of the comic (not just preview ones). Frontend needs
   // the full book structure to render locked pages with a paywall overlay.
+  //
+  // artworkUrl is returned for EVERY page, including locked ones, so the
+  // paywall can show the real page blurred behind it rather than a blank box.
+  // That is a deliberate, cosmetic-only paywall: a client can read the URL out
+  // of this response and fetch the unblurred art. It rests on the existing
+  // position that blank-bubble artwork — no face swap, no personalisation — is
+  // not the sellable product. Preview-page artwork was already public via
+  // GET /api/public/comics/:id; this widens that to the whole book.
+  //
+  // The dimensions travel with it so the client can reserve the correct
+  // aspect-ratio box for a locked page instead of guessing at a square.
   const allPages = await prisma.page.findMany({
     where: { comicId: session.comicId },
     orderBy: { pageNumber: "asc" },
@@ -247,6 +258,9 @@ export const getOrderSessionId = async (sessionId: string) => {
       pageNumber: true,
       isPreviewPage: true,
       hasFace: true,
+      artworkUrl: true,
+      artworkWidth: true,
+      artworkHeight: true,
     },
   });
 
@@ -301,6 +315,11 @@ export const getOrderSessionId = async (sessionId: string) => {
       pageNumber: page.pageNumber,
       isPreviewPage: page.isPreviewPage,
       hasFace: page.hasFace,
+      // Null until the admin attaches artwork — clients must fall back rather
+      // than assume a URL is present.
+      artworkUrl: page.artworkUrl,
+      artworkWidth: page.artworkWidth,
+      artworkHeight: page.artworkHeight,
       variants,
     };
   });

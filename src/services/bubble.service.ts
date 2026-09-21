@@ -25,6 +25,9 @@ export async function createBubble(pageId: string, input: CreateBubbleInput) {
     dialogue: input.dialogue,
     fontSize: input.fontSize,
     fontColor: input.fontColor,
+    textAlign: input.textAlign,
+    textVerticalAlign: input.textVerticalAlign,
+    textCase: input.textCase,
     sortOrder: input.sortOrder,
   };
 
@@ -110,6 +113,10 @@ export async function updateBubble(bubbleId: string, input: UpdateBubbleInput) {
   if (input.dialogue !== undefined) data.dialogue = input.dialogue;
   if (input.fontSize !== undefined) data.fontSize = input.fontSize;
   if (input.fontColor !== undefined) data.fontColor = input.fontColor;
+  if (input.textAlign !== undefined) data.textAlign = input.textAlign;
+  if (input.textVerticalAlign !== undefined)
+    data.textVerticalAlign = input.textVerticalAlign;
+  if (input.textCase !== undefined) data.textCase = input.textCase;
   if (input.sortOrder !== undefined) data.sortOrder = input.sortOrder;
 
   // Handle fontId separately — it's a relation, not a plain field

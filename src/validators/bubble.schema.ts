@@ -6,6 +6,12 @@ import {
   MAX_FONT_SIZE,
   DEFAULT_FONT_COLOR,
   FONT_COLOR_PATTERN,
+  TEXT_ALIGNS,
+  TEXT_VERTICAL_ALIGNS,
+  TEXT_CASES,
+  DEFAULT_TEXT_ALIGN,
+  DEFAULT_TEXT_VERTICAL_ALIGN,
+  DEFAULT_TEXT_CASE,
 } from "../config/generation.js";
 
 const FONT_COLOR_MESSAGE =
@@ -14,55 +20,85 @@ const FONT_COLOR_MESSAGE =
 // Regex FIRST, lowercase SECOND. Validating before transforming means a pasted
 // "#FFAA00" is accepted and normalised rather than reported as malformed, while
 // genuinely bad input still fails against the original string the client sent.
-const fontColorSchema = z
+export const fontColorSchema = z
   .string()
   .trim()
   .regex(FONT_COLOR_PATTERN, FONT_COLOR_MESSAGE)
   .transform((value) => value.toLowerCase());
 
+/**
+ * The geometry and styling fields shared by every schema that describes a
+ * bubble — currently createBubbleSchema and the preview-stamp endpoint.
+ *
+ * Exported as raw field definitions rather than a schema so callers can spread
+ * them into their own z.object() and add what they need. Re-typing these in a
+ * second file is how the preview would start accepting geometry the real create
+ * endpoint rejects, which would make the preview lie.
+ */
+export const bubbleGeometryFields = {
+  x: z
+    .number()
+    .min(0, "x must be a 0–1 fraction of the artwork width")
+    .max(1, "x must be a 0–1 fraction of the artwork width"),
+  y: z
+    .number()
+    .min(0, "y must be a 0–1 fraction of the artwork height")
+    .max(1, "y must be a 0–1 fraction of the artwork height"),
+  width: z
+    .number()
+    .gt(0, "width must be greater than 0")
+    .max(1, "width cannot exceed the full artwork width"),
+  height: z
+    .number()
+    .gt(0, "height must be greater than 0")
+    .max(1, "height cannot exceed the full artwork height"),
+  fontSize: z
+    .number()
+    .min(MIN_FONT_SIZE, `fontSize must be at least ${MIN_FONT_SIZE}`)
+    .max(MAX_FONT_SIZE, `fontSize cannot exceed ${MAX_FONT_SIZE}`)
+    .default(DEFAULT_FONT_SIZE),
+  fontColor: fontColorSchema.default(DEFAULT_FONT_COLOR),
+  textAlign: z.enum(TEXT_ALIGNS).default(DEFAULT_TEXT_ALIGN),
+  textVerticalAlign: z
+    .enum(TEXT_VERTICAL_ALIGNS)
+    .default(DEFAULT_TEXT_VERTICAL_ALIGN),
+  textCase: z.enum(TEXT_CASES).default(DEFAULT_TEXT_CASE),
+};
+
+/**
+ * The two bounds checks that need the whole rectangle at once: x and width are
+ * each individually valid but can still overflow together.
+ */
+export function refineBubbleBounds<T extends z.ZodTypeAny>(schema: T) {
+  return schema
+    .refine(
+      (data: any) => data.x + data.width <= 1 + BUBBLE_BOUND_EPSILON,
+      {
+        message: "Bubble extends past the right edge of the artwork",
+        path: ["width"],
+      }
+    )
+    .refine(
+      (data: any) => data.y + data.height <= 1 + BUBBLE_BOUND_EPSILON,
+      {
+        message: "Bubble extends past the bottom edge of the artwork",
+        path: ["height"],
+      }
+    );
+}
+
 // Bubble geometry is normalized to 0–1 fractions of the artwork, never pixels.
 // x/y is the top-left corner; the whole rectangle must fit inside the page.
-export const createBubbleSchema = z
-  .object({
-    x: z
-      .number()
-      .min(0, "x must be a 0–1 fraction of the artwork width")
-      .max(1, "x must be a 0–1 fraction of the artwork width"),
-    y: z
-      .number()
-      .min(0, "y must be a 0–1 fraction of the artwork height")
-      .max(1, "y must be a 0–1 fraction of the artwork height"),
-    width: z
-      .number()
-      .gt(0, "width must be greater than 0")
-      .max(1, "width cannot exceed the full artwork width"),
-    height: z
-      .number()
-      .gt(0, "height must be greater than 0")
-      .max(1, "height cannot exceed the full artwork height"),
+export const createBubbleSchema = refineBubbleBounds(
+  z.object({
+    // Geometry, font size, colour, placement and casing — shared with the
+    // preview endpoint so the two can never disagree about what is valid.
+    ...bubbleGeometryFields,
     dialogue: z.string().min(1),
     fontId: z.string().uuid().optional(),
-    // Fraction of the artwork's HEIGHT, not pixels.
-    fontSize: z
-      .number()
-      .min(MIN_FONT_SIZE, `fontSize must be at least ${MIN_FONT_SIZE}`)
-      .max(MAX_FONT_SIZE, `fontSize cannot exceed ${MAX_FONT_SIZE}`)
-      .default(DEFAULT_FONT_SIZE),
-    // Defaulted rather than optional so validateBody hands the service a colour
-    // even when the client omits one — same pattern as fontSize.
-    fontColor: fontColorSchema.default(DEFAULT_FONT_COLOR),
     sortOrder: z.number().int().default(0),
   })
-  // x and width are each individually valid but can still overflow together —
-  // only an object-level check catches that.
-  .refine((data) => data.x + data.width <= 1 + BUBBLE_BOUND_EPSILON, {
-    message: "Bubble extends past the right edge of the artwork",
-    path: ["width"],
-  })
-  .refine((data) => data.y + data.height <= 1 + BUBBLE_BOUND_EPSILON, {
-    message: "Bubble extends past the bottom edge of the artwork",
-    path: ["height"],
-  });
+);
 
 // No sum refine here: PATCH is partial, so Zod may only see `x` and have no idea
 // what `width` is. That cross-check lives in bubble.service.updateBubble(),
@@ -99,6 +135,11 @@ export const updateBubbleSchema = z
     // Optional, never nullable: the column is NOT NULL, so "clear the colour"
     // is not a thing a client can express — it sets #000000 instead.
     fontColor: fontColorSchema.optional(),
+    // Same rule as fontColor: optional, never nullable. These columns are NOT
+    // NULL, so "unset the alignment" means sending CENTER, not null.
+    textAlign: z.enum(TEXT_ALIGNS).optional(),
+    textVerticalAlign: z.enum(TEXT_VERTICAL_ALIGNS).optional(),
+    textCase: z.enum(TEXT_CASES).optional(),
     sortOrder: z.number().int().nonnegative().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {

@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { getPublicUrl, getSignedUploadUrl } from "../lib/r2.js";
+import {
+  deleteFile,
+  getKeyFromPublicUrl,
+  getPublicUrl,
+  getSignedUploadUrl,
+} from "../lib/r2.js";
 import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import { ConflictError, NotFoundError } from "../utils/errors.js";
@@ -110,6 +115,14 @@ export const getAllCountries = async () => {
       orderBy: {
         name: "asc",
       },
+      // Admin-only. Powers the "this will also delete N pricing rule(s)"
+      // warning in the delete dialog — deleting a country cascades its
+      // pricing rules away, so the admin is told the blast radius first.
+      // Deliberately NOT added to getActiveCountries(): that list is public
+      // and carries an explicit select so internals never leak.
+      include: {
+        _count: { select: { pricingRules: true } },
+      },
     });
 
     return countries;
@@ -154,6 +167,20 @@ export const getActiveCountries = async () => {
   }
 };
 
+/**
+ * Deletes a country and every pricing rule that references it.
+ *
+ * The pricing rules go via the DB-level `onDelete: Cascade` on
+ * PricingRule.country — this function never deletes them itself. The delete is
+ * unconditional by design: it used to 409 when any pricing rule referenced the
+ * country, which left the admin with no route out short of hand-deleting rules
+ * comic by comic.
+ *
+ * Note this wipes pricing for every comic priced in that country, PUBLISHED
+ * ones included, with no undo. The admin-panel confirmation dialog showing the
+ * rule count is what guards against an accidental click — hence the count
+ * exposed on getAllCountries() and returned here.
+ */
 export const deleteCountry = async (countryId: string) => {
   const country = await prisma.country.findUnique({
     where: { id: countryId },
@@ -163,17 +190,33 @@ export const deleteCountry = async (countryId: string) => {
     throw new NotFoundError("Country not found.");
   }
 
+  // NOT a guard — read before the delete purely so we can report how many rows
+  // the cascade took with it. Must run before country.delete(), or the rules
+  // are already gone and this always reads 0.
   const pricingRuleCount = await prisma.pricingRule.count({
     where: { countryId },
   });
 
-  if (pricingRuleCount > 0) {
-    throw new ConflictError(
-      `Cannot delete country "${country.name}" — ${pricingRuleCount} pricing rule(s) reference it. Remove the pricing rules first.`
+  await prisma.country.delete({ where: { id: countryId } });
+
+  // DB first, R2 second, best-effort — same ordering as deleteHeroImage. The
+  // cascade has already committed by this point, so a failed cleanup must
+  // never fail the request; it just leaves an orphaned flag in the bucket.
+  const r2Key = getKeyFromPublicUrl(country.flagUrl);
+
+  try {
+    await deleteFile("public", r2Key);
+  } catch (error) {
+    logger.warn(
+      { error, countryId, r2Key },
+      "Country deleted from database but R2 flag cleanup failed"
     );
   }
 
-  await prisma.country.delete({ where: { id: countryId } });
+  logger.info(
+    { countryId, countryCode: country.code, deletedPricingRules: pricingRuleCount },
+    "Country deleted"
+  );
 
-  logger.info({ countryId, countryCode: country.code }, "Country deleted");
+  return { deletedPricingRules: pricingRuleCount };
 };

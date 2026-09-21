@@ -22,6 +22,9 @@ import {
   getPublicBlogBySlugHandler,
   getPublicBlogsHandler,
 } from "../controllers/blog.controller.js";
+import { getPublicSitePageHandler } from "../controllers/sitePage.controller.js";
+import { getActiveGoogleReviewsHandler } from "../controllers/googleReview.controller.js";
+import { getPublicSiteSettingHandler } from "../controllers/siteSetting.controller.js";
 const router = Router();
 
 // This will give the public comic
@@ -52,8 +55,12 @@ router.get("/announcements", getActiveAnnouncementsHandler);
 router.get("/hero-images", getActiveHeroImagesHandler);
 
 
-// customer reviews get endpoint : 
+// customer reviews get endpoint :
 router.get("/customer-reviews", getActiveCustomerReviewsHandler);
+
+
+// google reviews — active only, newest first
+router.get("/google-reviews", getActiveGoogleReviewsHandler);
 
 
 // team meber
@@ -76,6 +83,15 @@ router.get("/blogs/:slug", getPublicBlogBySlugHandler);
 // countries — active only, for the shipping/pricing country picker
 router.get("/countries", getActiveCountriesHandler);
 
+
+
+// site pages — published only; 404 for an unpublished or never-saved page
+router.get("/site-pages/:slug", getPublicSitePageHandler);
+
+
+// site settings — brand + contact details. Consumed by /contact AND the
+// Footer, so this is hit on every page load; returns null until first saved.
+router.get("/site-settings", getPublicSiteSettingHandler);
 
 
 // feedback

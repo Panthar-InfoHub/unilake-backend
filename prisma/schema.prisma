@@ -126,6 +126,7 @@ model Comic {
   pageCount          Int
   freePreviewPages   Int
   coverThumbnailUrls String[]    @default([])
+  previewVideoUrl    String?
   loraFileUrl        String?
   loraStrength       Float       @default(1.0)
   status             ComicStatus @default(DRAFT)
@@ -136,6 +137,10 @@ model Comic {
   fonts         Font[]
   pricingRules  PricingRule[]
   orderSessions OrderSession[]
+  facts         ComicFact[]
+
+  metaTitle       String?
+  metaDescription String?
 
   isBestseller Boolean @default(false)
 
@@ -184,6 +189,24 @@ model Page {
   @@map("pages")
 }
 
+enum TextAlign {
+  LEFT
+  CENTER
+  RIGHT
+}
+
+enum TextVerticalAlign {
+  TOP
+  MIDDLE
+  BOTTOM
+}
+
+enum TextCase {
+  AS_TYPED
+  UPPERCASE
+  LOWERCASE
+}
+
 model Bubble {
   id     String @id @default(uuid())
   pageId String
@@ -207,6 +230,10 @@ model Bubble {
   // Default 0.02 ≈ 31px on a 1536px-tall page.
   fontSize  Float   @default(0.02)
   fontColor String  @default("#000000")
+
+  textAlign         TextAlign         @default(CENTER)
+  textVerticalAlign TextVerticalAlign @default(MIDDLE)
+  textCase          TextCase          @default(AS_TYPED)
 
   sortOrder Int @default(0) // order bubbles were added, for predictable rendering/debugging
 
@@ -240,8 +267,9 @@ model PricingRule {
   comic   Comic  @relation(fields: [comicId], references: [id], onDelete: Cascade)
 
   countryId String
-  country   Country   @relation(fields: [countryId], references: [id])
+  country   Country   @relation(fields: [countryId], references: [id], onDelete: Cascade)
   coverType CoverType
+  mrp       Decimal?  @db.Decimal(10, 2)
   price     Decimal   @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
@@ -422,7 +450,7 @@ model Order {
   shiprocketShipmentId String?
   courierId            Int?
   isInternational      Boolean   @default(false)
-  trackingUrl         String?
+  trackingUrl          String?
 
   // Real package dimensions (admin-entered at packaging)
   finalLength  Float?
@@ -570,8 +598,6 @@ enum FeedbackStatus {
 model Feedback {
   id        String         @id @default(uuid())
   name      String
-  email     String
-  phone     String
   message   String         @db.Text
   status    FeedbackStatus @default(OPEN)
   createdAt DateTime       @default(now())
@@ -640,9 +666,129 @@ model Blog {
 
   isActive Boolean @default(false)
 
+  metaTitle       String?
+  metaDescription String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([isActive, createdAt])
   @@map("blogs")
+}
+
+enum SitePageSlug {
+  PRIVACY
+  TERMS
+  REFUND
+}
+
+model SitePage {
+  id   String       @id @default(uuid())
+  slug SitePageSlug @unique // fixed set — admin edits, never creates
+
+  title String // H1 on the page, e.g. "Privacy Policy"
+  body  String @db.Text // TipTap HTML, same as Blog.body
+
+  isActive Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt // powers "Last updated: …"
+
+  @@map("site_pages")
+}
+
+model SiteSetting {
+  // Fixed id makes this a true singleton: every read and write targets the
+  // same row, so upsert needs no lookup and duplicates are impossible.
+  id String @id @default("singleton")
+
+  // ---- Store status ----
+  acceptingOrders  Boolean @default(true)
+  // ---- Brand ----
+  // Rendered in the Footer's left column. Was hardcoded in Footer.tsx.
+  brandDescription String? @db.Text
+
+  // ---- Contact page intro ----
+  headline    String?
+  description String? @db.Text
+
+  // ---- Contact channels ----
+  email         String?
+  phone         String?
+  whatsappPhone String?
+  businessHours String? // free text, e.g. "Mon–Fri, 9am–6pm IST"
+
+  // ---- Address ----
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  state        String?
+  zip          String?
+  country      String?
+  mapEmbedUrl  String?
+
+  // ---- Socials — also consumed by the Footer ----
+  instagramUrl String?
+  facebookUrl  String?
+  twitterUrl   String?
+  youtubeUrl   String?
+  linkedinUrl  String?
+
+  metaTitle       String?
+  metaDescription String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("site_settings")
+}
+
+// ============================================================
+// GOOGLE REVIEWS (homepage "Excellent On Google" section)
+// ============================================================
+
+model GoogleReview {
+  id           String @id @default(uuid())
+  customerName String
+
+  // Whole stars only, 1–5. Postgres has no CHECK constraint via Prisma, so the
+  // range is enforced in Zod — do not write to this column outside the service.
+  rating Int
+
+  reviewText String @db.Text
+  imageUrl   String // required, R2 public URL
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, createdAt])
+  @@map("google_reviews")
+}
+
+enum ComicFactPlacement {
+  PRELOADER // the 55-second loading screen before the preview opens
+  GENERATING // the "GENERATING..." boxes on each page while it renders
+}
+
+// ============================================================
+// COMIC FACTS (rotating lines shown while a comic generates)
+// ============================================================
+
+model ComicFact {
+  id      String @id @default(uuid())
+  comicId String
+  comic   Comic  @relation(fields: [comicId], references: [id], onDelete: Cascade)
+
+  placement ComicFactPlacement
+
+  text String @db.Text
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([comicId, placement, isActive])
+  @@map("comic_facts")
 }

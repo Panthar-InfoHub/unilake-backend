@@ -6,7 +6,12 @@ import {
   getPublicUrl,
   getSignedUploadUrl,
 } from "../lib/r2.js";
-import { probeImageDimensions, type ImageDimensions } from "../lib/image.js";
+import {
+  buildDisplayImage,
+  probeImageDimensions,
+  type ImageDimensions,
+} from "../lib/image.js";
+import { stampTextOnPage } from "../jobs/workers/sd/textStamp.js";
 import { config } from "../config/env.js";
 import {
   NotFoundError,
@@ -18,8 +23,10 @@ import type { Prisma } from "../generated/prisma/client.js";
 import type {
   CreatePageInput,
   GetPageArtworkUploadUrlInput,
+  PreviewPageStampInput,
   UpdatePageInput,
 } from "../validators/page.schema.js";
+import type { Bubble, Font } from "../generated/prisma/client.js";
 
 const PAGE_ASSET_UPLOAD_EXPIRY_SECONDS = 15 * 60;
 
@@ -452,4 +459,140 @@ export async function reorderComicPages(
   logger.info({ comicId, orderedPageIds }, "Comic pages reordered");
 
   return listComicPages(comicId);
+}
+
+/**
+ * Render a page's text stamping for the admin bubble mapper — no face swap.
+ *
+ * This is the SAME renderer the generation pipeline uses, called with bubbles
+ * supplied by the browser instead of read from the DB. That is deliberate: the
+ * mapper holds unsaved edits locally, so rendering stored rows would show the
+ * admin something other than what is on their screen.
+ *
+ * Nothing is persisted. No DB writes, no R2 uploads, no PageVersion, no
+ * session. A buffer is produced, encoded, and dropped.
+ *
+ * Accuracy note: for a page with `hasFace: false` this is not an approximation
+ * — the pipeline's stamped image IS the final image for those pages. For face
+ * pages it is the exact input the face swap receives.
+ */
+export async function previewPageTextStamp(
+  pageId: string,
+  input: PreviewPageStampInput
+) {
+  const page = await prisma.page.findUnique({ where: { id: pageId } });
+
+  if (!page) {
+    throw new NotFoundError("Page not found");
+  }
+
+  // Checked here rather than letting the renderer throw: it needs all three and
+  // its own error is written for a worker log, not for an admin looking at a
+  // modal wondering what went wrong.
+  if (!page.artworkUrl || !page.artworkWidth || !page.artworkHeight) {
+    throw new ValidationError(
+      "This page has no artwork yet. Upload artwork before previewing."
+    );
+  }
+
+  // --- Resolve fonts, one query for the whole page ---
+  const fontIds = [
+    ...new Set(
+      input.bubbles
+        .map((bubble) => bubble.fontId)
+        .filter((fontId): fontId is string => Boolean(fontId))
+    ),
+  ];
+
+  const fonts = fontIds.length
+    ? await prisma.font.findMany({ where: { id: { in: fontIds } } })
+    : [];
+
+  const fontsById = new Map(fonts.map((font) => [font.id, font]));
+
+  // Same guard updateBubble applies. Without it an admin could preview using
+  // another comic's font, which would render something the real generation
+  // could never produce.
+  for (const font of fonts) {
+    if (font.comicId !== page.comicId) {
+      throw new ConflictError(
+        "A font does not belong to the same comic as this page"
+      );
+    }
+  }
+
+  // --- Shape the incoming bubbles into what the renderer expects ---
+  //
+  // stampTextOnPage wants full Bubble rows joined to their Font. These are
+  // drafts, so id/pageId/timestamps are synthesised. The client's draft id is
+  // passed through where present purely because the renderer names the bubble
+  // in its error messages, and a real draft id is far more useful there than a
+  // placeholder would be.
+  const now = new Date();
+
+  const bubbles: (Bubble & { font: Font | null })[] = input.bubbles.map(
+    (bubble, index) => ({
+      id: bubble.id ?? `preview-${index}`,
+      pageId: page.id,
+      x: bubble.x,
+      y: bubble.y,
+      width: bubble.width,
+      height: bubble.height,
+      dialogue: bubble.dialogue,
+      fontId: bubble.fontId ?? null,
+      fontSize: bubble.fontSize,
+      fontColor: bubble.fontColor,
+      textAlign: bubble.textAlign,
+      textVerticalAlign: bubble.textVerticalAlign,
+      textCase: bubble.textCase,
+      sortOrder: index,
+      createdAt: now,
+      updatedAt: now,
+      font: bubble.fontId ? (fontsById.get(bubble.fontId) ?? null) : null,
+    })
+  );
+
+  const stampedBuffer = await stampTextOnPage({
+    page,
+    bubbles,
+    childName: input.childName,
+    pronounKey: input.pronounKey,
+  });
+
+  // The print master is 4–5 MB of lossless PNG; a browser preview does not need
+  // that. Best-effort, exactly as the worker treats it — a resize failure must
+  // not throw away a render that already succeeded, so fall back to the PNG.
+  let imageBuffer = stampedBuffer;
+  let contentType = "image/png";
+
+  try {
+    imageBuffer = await buildDisplayImage(stampedBuffer);
+    contentType = "image/webp";
+  } catch (error) {
+    logger.warn(
+      { error, pageId },
+      "Preview display derivative failed; falling back to the full-size PNG"
+    );
+  }
+
+  logger.info(
+    {
+      pageId,
+      bubbleCount: bubbles.length,
+      childName: input.childName,
+      pronounKey: input.pronounKey,
+      bytes: imageBuffer.byteLength,
+      contentType,
+    },
+    "Rendered bubble mapping preview"
+  );
+
+  return {
+    // A data URI so the response still travels through sendSuccess like every
+    // other admin endpoint. Raw bytes would bypass the response envelope and
+    // the frontend's axios interceptor that unwraps it.
+    image: `data:${contentType};base64,${imageBuffer.toString("base64")}`,
+    artworkWidth: page.artworkWidth,
+    artworkHeight: page.artworkHeight,
+  };
 }

@@ -39,3 +39,19 @@ export const MAX_FONT_SIZE = 0.25;
 // check passes.
 export const DEFAULT_FONT_COLOR = "#000000";
 export const FONT_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+// Bubble text placement and casing. The three defaults below are not arbitrary:
+// they are exactly what the renderer did unconditionally before these fields
+// existed (centred horizontally, centred vertically, text drawn as typed), so
+// every bubble created before the migration keeps rendering identically.
+//
+// Values are the Prisma enums TextAlign / TextVerticalAlign / TextCase. Kept
+// here as plain literals — same as every other default in this file — so the
+// Zod schemas have one import site and the constants stay readable.
+export const TEXT_ALIGNS = ["LEFT", "CENTER", "RIGHT"] as const;
+export const TEXT_VERTICAL_ALIGNS = ["TOP", "MIDDLE", "BOTTOM"] as const;
+export const TEXT_CASES = ["AS_TYPED", "UPPERCASE", "LOWERCASE"] as const;
+
+export const DEFAULT_TEXT_ALIGN = "CENTER";
+export const DEFAULT_TEXT_VERTICAL_ALIGN = "MIDDLE";
+export const DEFAULT_TEXT_CASE = "AS_TYPED";
