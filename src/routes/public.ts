@@ -14,6 +14,8 @@ import { getActiveCustomerReviewsHandler } from "../controllers/customerReview.c
 import { getActiveAnnouncementsHandler } from "../controllers/announcement.controller.js";
 import { createFeedbackHandler } from "../controllers/feedback.controller.js";
 import { createFeedbackSchema } from "../validators/feedback.schema.js";
+import { createContactEnquiryHandler } from "../controllers/contactEnquiry.controller.js";
+import { createContactEnquirySchema } from "../validators/contactEnquiry.schema.js";
 import { getActiveTeamMembersHandler } from "../controllers/teamMember.controller.js";
 import { getActiveCountriesHandler } from "../controllers/country.controller.js";
 import { getPublicHowItWorksHandler } from "../controllers/howItWorks.controller.js";
@@ -94,7 +96,17 @@ router.get("/site-pages/:slug", getPublicSitePageHandler);
 router.get("/site-settings", getPublicSiteSettingHandler);
 
 
-// feedback
+// feedback — anonymous book suggestions from the homepage block. No contact
+// details by design; see contact-enquiries below for the /contact form.
 router.post("/feedbacks", validateBody(createFeedbackSchema), createFeedbackHandler);
+
+
+// contact enquiries — the /contact form. Separate endpoint and separate table
+// from feedback: this one carries a reply channel and is expected to be answered.
+router.post(
+  "/contact-enquiries",
+  validateBody(createContactEnquirySchema),
+  createContactEnquiryHandler
+);
 
 export default router;

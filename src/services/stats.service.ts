@@ -300,6 +300,7 @@ export async function getStatsSummary(range: StatsRange) {
     abandonedCheckouts,
     staleTracking,
     openFeedback,
+    openEnquiries,
     recentOrderRows,
     topComics,
   ] = await Promise.all([
@@ -361,6 +362,11 @@ export async function getStatsSummary(range: StatsRange) {
     }),
 
     prisma.feedback.count({ where: { status: "OPEN" } }),
+
+    // --- Open contact enquiries. Counted separately from feedback: an
+    //     unanswered enquiry is a customer waiting on a reply, which is a
+    //     different (and more urgent) thing than an unread book suggestion.
+    prisma.contactEnquiry.count({ where: { status: "OPEN" } }),
 
     // --- Recent orders. Always newest-first regardless of range: this is the
     //     "what just happened" list, not a report. Select mirrors
@@ -460,6 +466,7 @@ export async function getStatsSummary(range: StatsRange) {
       abandonedCheckouts,
       staleTracking,
       openFeedback,
+      openEnquiries,
     },
 
     topComics,

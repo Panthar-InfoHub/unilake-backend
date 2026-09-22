@@ -178,6 +178,75 @@ export async function getTrackingForUser(
 }
 
 // ============================================================
+// GENERATED COVER (shared by the admin list + detail endpoints)
+// ============================================================
+//
+// Both admin endpoints previously showed Comic.coverThumbnailUrls — the
+// MARKETING thumbnail of the template, identical for every customer who
+// ordered that comic. What an admin actually needs is the personalised page
+// that this specific child's book opens on, which lives on PageVersion.
+
+/**
+ * Page 1 is the front cover of every comic. There is no isCover flag on Page —
+ * the cover is positional — so this constant is the single place that encodes
+ * it. Change it here and both endpoints follow.
+ */
+const COVER_PAGE_NUMBER = 1;
+
+type CoverCandidate = {
+  variantIndex: number;
+  isSelected: boolean;
+  displayImageUrl: string | null;
+  finalImageUrl: string | null;
+};
+
+export type GeneratedCover = {
+  imageUrl: string;
+  variantIndex: number;
+  isSelected: boolean;
+};
+
+/**
+ * Picks which generated page-1 variant represents this order's cover.
+ *
+ * `isSelected` wins outright: sendToPrint writes it on exactly the variants
+ * that went into the PDF, so for a CONFIRMED order it IS the printed cover.
+ * Before send-to-print nothing is selected at all, so the newest variant is the
+ * closest available truth — it is what the customer is looking at in their own
+ * preview, and what they are most likely to pick.
+ *
+ * Deliberately does NOT rely on the caller's ordering. The two call sites build
+ * their candidate lists from different queries, and a positional assumption
+ * here would silently pick the wrong variant if either query's orderBy changed.
+ *
+ * Returns null when nothing is generated yet — a legitimate state for an order
+ * at CREATED, or one whose page-1 generation final-failed. Callers render a
+ * placeholder rather than falling back to the template thumbnail, which would
+ * look like a generated cover and mislead whoever is checking what shipped.
+ */
+function pickGeneratedCover(candidates: CoverCandidate[]): GeneratedCover | null {
+  if (candidates.length === 0) return null;
+
+  const chosen =
+    candidates.find((c) => c.isSelected) ??
+    candidates.reduce((best, c) => (c.variantIndex > best.variantIndex ? c : best));
+
+  // displayImageUrl is the ~250KB webp derivative and is what a browser should
+  // render. finalImageUrl (the 4–5MB print master) is only reached on rows
+  // written before the derivative existed, or where building it failed —
+  // buildAndUploadDisplayImage is best-effort by design and returns null rather
+  // than failing the generation job.
+  const imageUrl = chosen.displayImageUrl ?? chosen.finalImageUrl;
+  if (!imageUrl) return null;
+
+  return {
+    imageUrl,
+    variantIndex: chosen.variantIndex,
+    isSelected: chosen.isSelected,
+  };
+}
+
+// ============================================================
 // ADMIN ORDER LIST (Section 7 — endpoint 1 of 8)
 // ============================================================
 //
@@ -243,6 +312,8 @@ export async function listAdminOrders(filters: ListAdminOrdersQueryInput) {
         deliveredAt: true,
         orderSession: {
           select: {
+            // Needed to key the batched cover lookup below — not rendered.
+            id: true,
             childName: true,
             comic: { select: { title: true } },
           },
@@ -251,6 +322,46 @@ export async function listAdminOrders(filters: ListAdminOrdersQueryInput) {
     }),
     prisma.order.count({ where }),
   ]);
+
+  // Generated covers, in ONE batched round trip.
+  //
+  // These cannot be nested into the row select above without Prisma issuing a
+  // per-row subquery, so they are fetched separately and joined in memory. Cost
+  // is one extra query per PAGE of results regardless of pageSize — deliberately
+  // not an N+1. Bounded by pageSize × the per-page variant cap.
+  //
+  // Runs after the transaction because the session ids only exist once it has
+  // resolved.
+  const sessionIds = orders.map((o) => o.orderSession.id);
+
+  const coverRows = sessionIds.length
+    ? await prisma.pageVersion.findMany({
+        where: {
+          orderSessionId: { in: sessionIds },
+          page: { pageNumber: COVER_PAGE_NUMBER },
+          status: "SD_READY",
+        },
+        select: {
+          orderSessionId: true,
+          variantIndex: true,
+          isSelected: true,
+          displayImageUrl: true,
+          finalImageUrl: true,
+        },
+      })
+    : [];
+
+  // Group by session so pickGeneratedCover sees one order's variants at a time.
+  // Building the map once is O(n); filtering per row below would be O(n²).
+  const candidatesBySession = new Map<string, CoverCandidate[]>();
+  for (const row of coverRows) {
+    const existing = candidatesBySession.get(row.orderSessionId);
+    if (existing) {
+      existing.push(row);
+    } else {
+      candidatesBySession.set(row.orderSessionId, [row]);
+    }
+  }
 
   const rows = orders.map((o) => ({
     id: o.id,
@@ -268,6 +379,10 @@ export async function listAdminOrders(filters: ListAdminOrdersQueryInput) {
     deliveredAt: o.deliveredAt,
     childName: o.orderSession.childName,
     comicTitle: o.orderSession.comic.title,
+    // Null when nothing is generated yet — the client renders a placeholder.
+    coverImageUrl:
+      pickGeneratedCover(candidatesBySession.get(o.orderSession.id) ?? [])
+        ?.imageUrl ?? null,
   }));
 
   return {
@@ -314,6 +429,21 @@ export async function getAdminOrderDetail(orderId: string) {
           },
           comic: {
             select: { id: true, title: true, coverThumbnailUrls: true },
+          },
+          // Every finished page-1 variant for this session. Bounded by the
+          // per-page variant cap (8 after payment), so this is a handful of
+          // rows — pickGeneratedCover decides which one is the cover.
+          pageVersions: {
+            where: {
+              page: { pageNumber: COVER_PAGE_NUMBER },
+              status: "SD_READY",
+            },
+            select: {
+              variantIndex: true,
+              isSelected: true,
+              displayImageUrl: true,
+              finalImageUrl: true,
+            },
           },
         },
       },
@@ -410,6 +540,11 @@ export async function getAdminOrderDetail(orderId: string) {
       age: order.orderSession.age,
       comic: order.orderSession.comic,
     },
+
+    // The personalised page this child's book opens on. Null until page 1 has
+    // generated. `isSelected` tells the admin whether they are looking at the
+    // cover that was actually printed or the customer's current best guess.
+    generatedCover: pickGeneratedCover(order.orderSession.pageVersions),
 
     webhookEvents: order.webhookEvents,
   };

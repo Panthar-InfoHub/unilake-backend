@@ -792,3 +792,27 @@ model ComicFact {
   @@index([comicId, placement, isActive])
   @@map("comic_facts")
 }
+
+
+enum ContactEnquiryStatus {
+  OPEN
+  VIEWED
+  RESOLVED
+  DISMISSED
+}
+
+model ContactEnquiry {
+  id      String @id @default(uuid())
+  name    String
+  email   String
+  phone   String
+  message String @db.Text
+
+  status ContactEnquiryStatus @default(OPEN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@map("contact_enquiries")
+}

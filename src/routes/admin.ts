@@ -132,6 +132,12 @@ import {
 } from "../controllers/feedback.controller.js";
 import { updateFeedbackStatusSchema } from "../validators/feedback.schema.js";
 import {
+  deleteContactEnquiryHandler,
+  getAllContactEnquiriesHandler,
+  updateContactEnquiryStatusHandler,
+} from "../controllers/contactEnquiry.controller.js";
+import { updateContactEnquiryStatusSchema } from "../validators/contactEnquiry.schema.js";
+import {
   getHowItWorksUploadUrlSchema,
   updateHowItWorksSchema,
 } from "../validators/howItWorks.schema.js";
@@ -542,7 +548,8 @@ router.patch(
   updateSiteSettingHandler
 );
 
-// feedback
+// feedback — anonymous book suggestions. Contact enquiries are a separate
+// domain with its own table and routes; see below.
 router.get("/feedbacks", getAllFeedbacksHandler);
 router.patch(
   "/feedbacks/:id/status",
@@ -550,6 +557,17 @@ router.patch(
   updateFeedbackStatusHandler
 );
 router.delete("/feedbacks/:id", deleteFeedbackHandler);
+
+
+// contact enquiries — /contact form submissions. No create route: those come in
+// through the public router. No ordering hazard with /:id, the segment counts differ.
+router.get("/contact-enquiries", getAllContactEnquiriesHandler);
+router.patch(
+  "/contact-enquiries/:id/status",
+  validateBody(updateContactEnquiryStatusSchema),
+  updateContactEnquiryStatusHandler
+);
+router.delete("/contact-enquiries/:id", deleteContactEnquiryHandler);
 
 
 export default router;
