@@ -542,6 +542,7 @@ export async function previewPageTextStamp(
       fontId: bubble.fontId ?? null,
       fontSize: bubble.fontSize,
       fontColor: bubble.fontColor,
+      nameColor: bubble.nameColor ?? null,
       textAlign: bubble.textAlign,
       textVerticalAlign: bubble.textVerticalAlign,
       textCase: bubble.textCase,

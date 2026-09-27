@@ -1,5 +1,9 @@
 // Sharp text renderer.
 //
+// ⚠️ COPIED IN THE FRONTEND: frontend/lib/bubbleLayout.ts repeats this file's
+// layout (casing, name colour, wrap, fit, alignment) so the admin canvas shows
+// exactly what prints. Change layout here → change it there too.
+//
 // ⚠️ READ THIS BEFORE CHANGING HOW TEXT IS DRAWN.
 //
 // Text is rendered by converting glyphs to SVG <path> outlines with opentype.js,
@@ -56,8 +60,8 @@ import opentype from "opentype.js";
 import { downloadFileToBuffer, getKeyFromPublicUrl } from "../../../lib/r2.js";
 import { logger } from "../../../lib/logger.js";
 import { ValidationError } from "../../../utils/errors.js";
-import { substituteTokens } from "./tokens.js";
-import { MIN_FONT_SIZE } from "../../../config/generation.js";
+import { substituteTokensToSegments, type DialogueSegment } from "./tokens.js";
+import { MIN_FONT_SIZE, FONT_COLOR_PATTERN } from "../../../config/generation.js";
 import type {
   Page,
   Bubble,
@@ -106,6 +110,104 @@ const LINE_HEIGHT_FACTOR = 1.15;
 
 /** Decimal places kept in emitted SVG path data. 2 is visually lossless at print size. */
 const PATH_PRECISION = 2;
+
+const PATH_ROUNDING_FACTOR = 10 ** PATH_PRECISION;
+
+// ============================================================
+// SVG PATH DATA (our own writer — do NOT use opentype's toPathData)
+// ============================================================
+//
+// ⚠️ opentype.js's Path.toPathData() can emit "NaN" for perfectly valid glyphs.
+//
+// Its rounding helper builds a string out of the coordinate's fractional part
+// and appends "e+2" to it. Float drift routinely produces coordinates like
+// 180.00000000000003, whose fractional part stringifies in exponent form
+// ("2.842170943040401e-14"), so the helper parses "2.84...e-14e+2" -> NaN.
+//
+// librsvg stops drawing a path at the first unparseable number, so every glyph
+// after that point — including all later lines, since a bubble is one <path> —
+// silently vanished. Sharp reported success. Whether a given coordinate drifts
+// depends on the exact font size and pen position, so the bug looked random:
+// TT Masters at 37px rendered fully, at 40px it printed "WOULD LIKE T".
+//
+// Rounding here is pure arithmetic on numbers — nothing is ever parsed back
+// from a string — so exponent notation cannot occur. After rounding to 2
+// decimals the smallest non-zero magnitude is 0.01, which String() never
+// writes in exponent form.
+
+/**
+ * One coordinate, rounded and serialised. Throws on NaN/Infinity rather than
+ * writing it: a non-finite value would truncate the path exactly like the bug
+ * above, so it must fail the render instead of silently dropping text.
+ */
+function formatCoord(value: number): string {
+  if (!Number.isFinite(value)) {
+    throw new ValidationError(
+      `Text rendering produced an invalid coordinate (${value}). ` +
+        `The bubble cannot be drawn safely.`,
+    );
+  }
+
+  const rounded = Math.round(value * PATH_ROUNDING_FACTOR) / PATH_ROUNDING_FACTOR;
+
+  // -0 would stringify as "0" anyway, but be explicit: "-0" must never appear.
+  return Object.is(rounded, -0) ? "0" : String(rounded);
+}
+
+/** Serialise opentype path commands to SVG path data. Replaces Path.toPathData. */
+function commandsToPathData(commands: opentype.PathCommand[]): string {
+  const f = formatCoord;
+
+  return commands
+    .map((command) => {
+      switch (command.type) {
+        case "M":
+          return `M${f(command.x)} ${f(command.y)}`;
+        case "L":
+          return `L${f(command.x)} ${f(command.y)}`;
+        case "C":
+          return `C${f(command.x1)} ${f(command.y1)} ${f(command.x2)} ${f(command.y2)} ${f(command.x)} ${f(command.y)}`;
+        case "Q":
+          return `Q${f(command.x1)} ${f(command.y1)} ${f(command.x)} ${f(command.y)}`;
+        case "Z":
+          return "Z";
+        default:
+          return "";
+      }
+    })
+    .join("");
+}
+
+/**
+ * Last line of defence before the SVG reaches Sharp.
+ *
+ * Path data may contain only the command letters we emit, digits, dots, minus
+ * signs and spaces. Anything else — "NaN", "Infinity", "e" notation — means
+ * librsvg would stop drawing partway and text would silently go missing from a
+ * printed book. Fail the render loudly instead, same posture as the missing-font
+ * and missing-glyph guards: the admin preview shows the error, and a real
+ * generation job fails rather than shipping truncated dialogue.
+ */
+const SAFE_PATH_DATA = /^[MLCQZ0-9. -]*$/;
+
+function assertSafePathData(pathData: string, bubbleId: string): void {
+  if (SAFE_PATH_DATA.test(pathData)) return;
+
+  const badIndex = pathData.search(/[^MLCQZ0-9. -]/);
+
+  logger.error(
+    {
+      bubbleId,
+      excerpt: pathData.slice(Math.max(0, badIndex - 40), badIndex + 40),
+    },
+    "Refusing to render bubble — SVG path data contains an invalid value",
+  );
+
+  throw new ValidationError(
+    `Bubble ${bubbleId} could not be rendered safely: its text outline contains an ` +
+      `invalid value, so part of the dialogue would be missing from the page.`,
+  );
+}
 
 // ============================================================
 // FONT LOADING
@@ -312,6 +414,99 @@ function applyTextCase(text: string, textCase: TextCase): string {
   }
 }
 
+// ============================================================
+// NAME-COLOUR TRACKING
+// ============================================================
+//
+// Bubble.nameColor paints the {name} part of the dialogue in its own colour.
+// Tokens are substituted before layout, so without this the renderer would no
+// longer know which characters were the name. Each piece of text therefore
+// carries a `nameMask`: one boolean per UTF-16 code unit of `text`, true where
+// that unit came from a {name} token. `text` and `nameMask` always have the same
+// length, and every slice of one is taken at the same indices from the other.
+//
+// Layout (wrapping, shrink-to-fit, alignment) reads `text` only, exactly as it
+// did before this existed — the mask never changes a size or a line break. It
+// is consulted only at the very end, to decide which colour each run is drawn in.
+
+type StyledText = {
+  text: string;
+  nameMask: boolean[];
+};
+
+/**
+ * Join substituted segments into one string plus its name mask, applying the
+ * bubble's casing and trimming the ends.
+ *
+ * Casing is applied PER SEGMENT, before joining. Casing can change a string's
+ * length ("ß" uppercases to "SS"), so casing the joined string afterwards would
+ * shift every index after that character and misalign the mask. Per-segment
+ * casing keeps each piece's mask exactly as long as its cased text. The only
+ * place this can differ from casing the whole string is context-sensitive
+ * lowercasing at a segment boundary (Greek final sigma) — irrelevant here.
+ *
+ * Trimming mirrors the old `.trim()` on the substituted dialogue: same
+ * whitespace definition (trimStart/trimEnd), applied to both arrays alike.
+ */
+function buildStyledText(
+  segments: DialogueSegment[],
+  textCase: TextCase,
+): StyledText {
+  let text = "";
+  const nameMask: boolean[] = [];
+
+  for (const segment of segments) {
+    const cased = applyTextCase(segment.text, textCase);
+    text += cased;
+    for (let index = 0; index < cased.length; index += 1) {
+      nameMask.push(segment.isName);
+    }
+  }
+
+  const start = text.length - text.trimStart().length;
+  const end = text.trimEnd().length;
+
+  if (end <= start) return { text: "", nameMask: [] };
+
+  return {
+    text: text.slice(start, end),
+    nameMask: nameMask.slice(start, end),
+  };
+}
+
+type ColourRun = {
+  text: string;
+  /** Code-unit offset of this run within its line. */
+  start: number;
+  isName: boolean;
+};
+
+/**
+ * Cut one line into maximal runs of the same colour.
+ *
+ * Cannot split a surrogate pair: both halves of a code point always come from
+ * the same segment, so they always carry the same mask value.
+ */
+function splitIntoColourRuns(line: StyledText): ColourRun[] {
+  const runs: ColourRun[] = [];
+  let start = 0;
+
+  for (let index = 1; index <= line.text.length; index += 1) {
+    const atEnd = index === line.text.length;
+
+    if (atEnd || line.nameMask[index] !== line.nameMask[start]) {
+      runs.push({
+        text: line.text.slice(start, index),
+        start,
+        isName: line.nameMask[start] === true,
+      });
+      start = index;
+    }
+  }
+
+  return runs;
+}
+
 function measureWidth(loaded: LoadedFont, text: string, fontSizePx: number): number {
   return loaded.canShape
     ? loaded.font.getAdvanceWidth(text, fontSizePx)
@@ -334,21 +529,25 @@ function buildLinePathData(
   baselineYPx: number,
   fontSizePx: number,
 ): string {
+  // Both branches serialise through commandsToPathData, never toPathData —
+  // see the note above commandsToPathData for why.
   if (loaded.canShape) {
-    return loaded.font
-      .getPath(line, xPx, baselineYPx, fontSizePx)
-      .toPathData(PATH_PRECISION);
+    return commandsToPathData(
+      loaded.font.getPath(line, xPx, baselineYPx, fontSizePx).commands,
+    );
   }
 
   const glyphPaths: string[] = [];
 
   layoutUnshaped(loaded.font, line, fontSizePx, (glyph, penXPx) => {
     glyphPaths.push(
-      glyph
-        // Passing the font hands the glyph its own default render options, the
-        // same ones Font.getPath would have applied on the shaped path.
-        .getPath(xPx + penXPx, baselineYPx, fontSizePx, undefined, loaded.font)
-        .toPathData(PATH_PRECISION),
+      commandsToPathData(
+        glyph
+          // Passing the font hands the glyph its own default render options, the
+          // same ones Font.getPath would have applied on the shaped path.
+          .getPath(xPx + penXPx, baselineYPx, fontSizePx, undefined, loaded.font)
+          .commands,
+      ),
     );
   });
 
@@ -384,23 +583,44 @@ function lineMetrics(font: opentype.Font, fontSizePx: number): LineMetrics {
  * Splits on whitespace only — words are never broken mid-character. A single
  * word wider than `maxWidthPx` goes on its own line and overflows; the caller's
  * shrink loop is what actually resolves that.
+ *
+ * Any run of whitespace (including the admin's own line breaks) collapses to a
+ * single space between words, as it always has. Each word keeps its slice of the
+ * name mask, and the joining space is marked "not name", so a word like
+ * "Ayush's" stays one word while only "Ayush" is marked. Line breaks and widths
+ * depend on `text` alone — identical to the pre-mask behaviour.
  */
 function wrapText(
   loaded: LoadedFont,
-  text: string,
+  styled: StyledText,
   maxWidthPx: number,
   fontSizePx: number,
-): string[] {
-  const words = text.split(/\s+/).filter(Boolean);
+): StyledText[] {
+  // \S+ yields exactly the words the old split(/\s+/).filter(Boolean) did, but
+  // with their offsets, which the mask slice needs.
+  const words: StyledText[] = [];
+  for (const match of styled.text.matchAll(/\S+/g)) {
+    const start = match.index;
+    words.push({
+      text: match[0],
+      nameMask: styled.nameMask.slice(start, start + match[0].length),
+    });
+  }
+
   if (words.length === 0) return [];
 
-  const lines: string[] = [];
-  let current = "";
+  const lines: StyledText[] = [];
+  let current: StyledText | null = null;
 
   for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
+    const candidate: StyledText = current
+      ? {
+          text: `${current.text} ${word.text}`,
+          nameMask: [...current.nameMask, false, ...word.nameMask],
+        }
+      : word;
 
-    if (measureWidth(loaded, candidate, fontSizePx) <= maxWidthPx) {
+    if (measureWidth(loaded, candidate.text, fontSizePx) <= maxWidthPx) {
       current = candidate;
     } else {
       if (current) lines.push(current);
@@ -415,7 +635,7 @@ function wrapText(
 
 type FittedText = {
   fontSizePx: number;
-  lines: string[];
+  lines: StyledText[];
   /**
    * True when the shrink loop found a size that genuinely fits the box on both
    * axes. False when it exhausted the range and fell back to the floor size,
@@ -443,7 +663,7 @@ type FittedText = {
  */
 function fitTextToBox(
   loaded: LoadedFont,
-  text: string,
+  styled: StyledText,
   boxWidthPx: number,
   boxHeightPx: number,
   initialFontSizePx: number,
@@ -451,12 +671,12 @@ function fitTextToBox(
 ): FittedText {
   const minFontSizePx = Math.max(1, MIN_FONT_SIZE * artworkHeight);
 
-  const fits = (fontSizePx: number): string[] | null => {
-    const lines = wrapText(loaded, text, boxWidthPx, fontSizePx);
+  const fits = (fontSizePx: number): StyledText[] | null => {
+    const lines = wrapText(loaded, styled, boxWidthPx, fontSizePx);
     if (lines.length === 0) return null;
 
     const widestLinePx = Math.max(
-      ...lines.map((line) => measureWidth(loaded, line, fontSizePx)),
+      ...lines.map((line) => measureWidth(loaded, line.text, fontSizePx)),
     );
     const totalHeightPx =
       lines.length * lineMetrics(loaded.font, fontSizePx).lineHeightPx;
@@ -475,7 +695,7 @@ function fitTextToBox(
 
   logger.warn(
     {
-      text: text.substring(0, 40),
+      text: styled.text.substring(0, 40),
       boxWidthPx,
       boxHeightPx,
       minFontSizePx,
@@ -485,7 +705,7 @@ function fitTextToBox(
 
   return {
     fontSizePx: minFontSizePx,
-    lines: wrapText(loaded, text, boxWidthPx, minFontSizePx),
+    lines: wrapText(loaded, styled, boxWidthPx, minFontSizePx),
     fitted: false,
   };
 }
@@ -495,13 +715,21 @@ function fitTextToBox(
 // ============================================================
 
 type BubbleSvgInputs = {
+  /** For the error message and log if the path data fails the safety check. */
+  bubbleId: string;
   widthPx: number;
   heightPx: number;
-  lines: string[];
+  lines: StyledText[];
   fontSizePx: number;
   loaded: LoadedFont;
   /** Bubble.fontColor — a validated 6-digit hex string, e.g. "#1a1a1a". */
   fill: string;
+  /**
+   * Colour for the {name} runs, or null when the name is drawn in `fill` like
+   * everything else. Resolved by the caller: null whenever Bubble.nameColor is
+   * unset OR equal to fontColor, so the single-colour path is taken in both.
+   */
+  nameFill: string | null;
   /** Bubble.textAlign — horizontal placement of each line within the box. */
   align: TextAlign;
   /** Bubble.textVerticalAlign — placement of the whole line block in the box. */
@@ -509,24 +737,30 @@ type BubbleSvgInputs = {
 };
 
 /**
- * Render the wrapped lines as a single <path> of glyph outlines, placed inside
- * the bubble box according to the bubble's horizontal and vertical alignment.
+ * Render the wrapped lines as glyph outlines, placed inside the bubble box
+ * according to the bubble's horizontal and vertical alignment.
+ *
+ * One <path> per colour: a single path when the name shares the text colour
+ * (byte-identical to the output before nameColor existed), two when it doesn't.
  *
  * There is no <text>, no font-family and no @font-face here by design — the
  * output depends on nothing installed on the host. Note also that no
  * user-supplied string reaches the SVG any more: path data is pure numbers and
- * `fill` is a hex colour the Zod schema has already matched against
- * /^#[0-9a-f]{6}$/ — neither can carry a quote or an angle bracket, so the
+ * `fill` / `nameFill` are hex colours the Zod schema has already matched against
+ * /^#[0-9a-f]{6}$/ (nameFill re-checked in resolveNameFill) — none can carry a
+ * quote or an angle bracket, so the
  * XML-escaping hazard that used to require escapeXml() is gone entirely.
  */
 function buildBubbleSvg(inputs: BubbleSvgInputs): string {
   const {
+    bubbleId,
     widthPx,
     heightPx,
     lines,
     fontSizePx,
     loaded,
     fill,
+    nameFill,
     align,
     verticalAlign,
   } = inputs;
@@ -550,22 +784,94 @@ function buildBubbleSvg(inputs: BubbleSvgInputs): string {
   // so horizontal alignment is arithmetic we do per line rather than an
   // attribute. Doing it per line (not once for the widest) is what gives a
   // left-aligned paragraph a straight left edge.
-  const pathData = lines
-    .map((line, index) => {
-      const lineWidthPx = measureWidth(loaded, line, fontSizePx);
-      const x =
-        align === "LEFT"
+  //
+  // Glyph outlines are collected into one bucket per colour. Each bucket
+  // becomes one <path>, so a two-colour bubble is exactly two paths.
+  const textPaths: string[] = [];
+  const namePaths: string[] = [];
+
+  lines.forEach((line, index) => {
+    // Placement uses the WHOLE line's width, colour or no colour, so a
+    // two-colour line sits exactly where the single-colour line would.
+    const lineWidthPx = measureWidth(loaded, line.text, fontSizePx);
+    const x =
+      align === "LEFT"
+        ? 0
+        : align === "RIGHT"
+          ? widthPx - lineWidthPx
+          : (widthPx - lineWidthPx) / 2;
+    const baselineY = firstBaselineY + index * lineHeightPx;
+
+    // Single colour: draw the line in one call, exactly as before nameColor
+    // existed. This is what keeps every existing bubble pixel-identical.
+    if (!nameFill) {
+      textPaths.push(buildLinePathData(loaded, line.text, x, baselineY, fontSizePx));
+      return;
+    }
+
+    // Two colours: draw each run on its own, starting where the text before it
+    // on this line ends. Measuring the prefix keeps the kerning and spacing
+    // INSIDE the prefix; only the one kerning pair straddling a colour change
+    // is lost (a pixel or two), which was accepted over a far more complex
+    // glyph-level split.
+    for (const run of splitIntoColourRuns(line)) {
+      // Whitespace-only runs draw nothing — skip rather than emit empty data.
+      if (run.text.trim().length === 0) continue;
+
+      const offsetPx =
+        run.start === 0
           ? 0
-          : align === "RIGHT"
-            ? widthPx - lineWidthPx
-            : (widthPx - lineWidthPx) / 2;
-      const baselineY = firstBaselineY + index * lineHeightPx;
+          : measureWidth(loaded, line.text.slice(0, run.start), fontSizePx);
 
-      return buildLinePathData(loaded, line, x, baselineY, fontSizePx);
-    })
-    .join(" ");
+      (run.isName ? namePaths : textPaths).push(
+        buildLinePathData(loaded, run.text, x + offsetPx, baselineY, fontSizePx),
+      );
+    }
+  });
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" viewBox="0 0 ${widthPx} ${heightPx}"><path d="${pathData}" fill="${fill}"/></svg>`;
+  const textData = textPaths.join(" ");
+  const nameData = namePaths.join(" ");
+
+  assertSafePathData(textData, bubbleId);
+  assertSafePathData(nameData, bubbleId);
+
+  // Single-colour output is byte-for-byte the old SVG. In two-colour mode an
+  // empty bucket (a bubble that is only "{name}", say) is left out entirely.
+  const paths: string[] = [];
+  if (!nameFill || textData.length > 0) {
+    paths.push(`<path d="${textData}" fill="${fill}"/>`);
+  }
+  if (nameFill && nameData.length > 0) {
+    paths.push(`<path d="${nameData}" fill="${nameFill}"/>`);
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" viewBox="0 0 ${widthPx} ${heightPx}">${paths.join("")}</svg>`;
+}
+
+/**
+ * Decide whether a bubble draws its name in a second colour.
+ *
+ * Returns null — meaning "one colour, the old code path" — when nameColor is
+ * unset or is the same colour as the text anyway. Otherwise returns the colour.
+ *
+ * The pattern check is defence in depth, not validation: Zod already enforced
+ * it on every write. It is here because this string is interpolated straight
+ * into SVG markup, and the module's guarantee is that no unchecked string ever
+ * reaches the SVG (see the note on buildBubbleSvg).
+ */
+function resolveNameFill(bubble: BubbleWithFont): string | null {
+  const nameColor = bubble.nameColor?.toLowerCase() ?? null;
+
+  if (!nameColor || nameColor === bubble.fontColor.toLowerCase()) return null;
+
+  if (!FONT_COLOR_PATTERN.test(nameColor)) {
+    throw new ValidationError(
+      `Bubble ${bubble.id} has an invalid nameColor "${bubble.nameColor}". ` +
+        `It must be a 6-digit hex colour like "#1a1a1a".`,
+    );
+  }
+
+  return nameColor;
 }
 
 // ============================================================
@@ -646,10 +952,15 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
     //
     // The transform covers the substituted child name too: "keep this bubble in
     // caps" means the whole line, not everything except the name.
-    const finalText = applyTextCase(
-      substituteTokens(bubble.dialogue, childName, pronounKey).trim(),
+    //
+    // Substitution keeps track of which characters are the name (the mask), so
+    // a bubble with a nameColor can paint them differently at the end. See
+    // buildStyledText for why casing is applied per segment.
+    const styled = buildStyledText(
+      substituteTokensToSegments(bubble.dialogue, childName, pronounKey),
       bubble.textCase,
     );
+    const finalText = styled.text;
 
     // Nothing to draw. A whitespace-only bubble is not an error — skip it.
     if (finalText.length === 0) continue;
@@ -683,7 +994,7 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
     // 4. Fit text into the bubble using real metrics
     const { fontSizePx, lines, fitted } = fitTextToBox(
       loaded,
-      finalText,
+      styled,
       widthPx,
       heightPx,
       initialFontSizePx,
@@ -709,9 +1020,13 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
     //                     they disagree with the real file everything downstream
     //                     is wrong in a way no other log would reveal.
     const measuredWidthPx = Math.max(
-      ...lines.map((line) => measureWidth(loaded, line, fontSizePx)),
+      ...lines.map((line) => measureWidth(loaded, line.text, fontSizePx)),
     );
     const blockHeightPx = lines.length * lineMetrics(loaded.font, fontSizePx).lineHeightPx;
+
+    // Resolved before logging so the log shows what was actually used: null
+    // means the name was drawn in the text colour (unset, or same colour).
+    const nameFill = resolveNameFill(bubble);
 
     // Deliberately `info`, not `debug`: the logger runs at level "info" whenever
     // NODE_ENV is production (see lib/logger.ts), so a debug line here would be
@@ -728,7 +1043,7 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
         // What we are drawing
         text: finalText.slice(0, 60),
         textLength: finalText.length,
-        lines,
+        lines: lines.map((line) => line.text),
 
         // The DB's artwork dimensions — everything below is derived from these
         artworkWidth: page.artworkWidth,
@@ -749,6 +1064,11 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
         textAlign: bubble.textAlign,
         textVerticalAlign: bubble.textVerticalAlign,
         textCase: bubble.textCase,
+
+        // Colours. nameFill is null when the name uses the text colour.
+        fontColor: bubble.fontColor,
+        nameColor: bubble.nameColor,
+        nameFill,
 
         // Resolved pixel geometry — boxWidthPx IS the SVG canvas width
         xPx,
@@ -772,12 +1092,14 @@ export async function stampTextOnPage(params: StampTextParams): Promise<Buffer> 
 
     // 5. Build the SVG (glyph outlines)
     const svg = buildBubbleSvg({
+      bubbleId: bubble.id,
       widthPx,
       heightPx,
       lines,
       fontSizePx,
       loaded,
       fill: bubble.fontColor,
+      nameFill,
       align: bubble.textAlign,
       verticalAlign: bubble.textVerticalAlign,
     });

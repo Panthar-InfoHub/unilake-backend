@@ -230,6 +230,7 @@ model Bubble {
   // Default 0.02 ≈ 31px on a 1536px-tall page.
   fontSize  Float   @default(0.02)
   fontColor String  @default("#000000")
+  nameColor String?
 
   textAlign         TextAlign         @default(CENTER)
   textVerticalAlign TextVerticalAlign @default(MIDDLE)

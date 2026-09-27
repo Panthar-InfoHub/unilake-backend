@@ -25,6 +25,7 @@ export async function createBubble(pageId: string, input: CreateBubbleInput) {
     dialogue: input.dialogue,
     fontSize: input.fontSize,
     fontColor: input.fontColor,
+    nameColor: input.nameColor,
     textAlign: input.textAlign,
     textVerticalAlign: input.textVerticalAlign,
     textCase: input.textCase,
@@ -113,6 +114,9 @@ export async function updateBubble(bubbleId: string, input: UpdateBubbleInput) {
   if (input.dialogue !== undefined) data.dialogue = input.dialogue;
   if (input.fontSize !== undefined) data.fontSize = input.fontSize;
   if (input.fontColor !== undefined) data.fontColor = input.fontColor;
+  // `!== undefined`, not truthiness: null is a real value here and means
+  // "reset to the text colour".
+  if (input.nameColor !== undefined) data.nameColor = input.nameColor;
   if (input.textAlign !== undefined) data.textAlign = input.textAlign;
   if (input.textVerticalAlign !== undefined)
     data.textVerticalAlign = input.textVerticalAlign;

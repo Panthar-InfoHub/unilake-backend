@@ -61,6 +61,7 @@ import {
   listComicFontsHandler,
   updateFontHandler,
   deleteFontHandler,
+  getFontFileHandler,
 } from "../controllers/font.controller.js";
 import {
   getFontUploadUrlSchema,
@@ -320,6 +321,9 @@ router.patch(
   updateFontHandler
 ); // update font name or file
 router.delete("/fonts/:fontId", deleteFontHandler); // delete font (blocks if bubbles reference it)
+// Raw font bytes for the bubble-mapper canvas. Binary response, not the JSON
+// envelope. Three segments, so no clash with PATCH/DELETE /fonts/:fontId.
+router.get("/fonts/:fontId/file", getFontFileHandler);
 
 // COMIC FACTS (rotating lines on the generation screens)
 // Create/list hang off the comic; edit/toggle/delete use a flat /facts/:factId,

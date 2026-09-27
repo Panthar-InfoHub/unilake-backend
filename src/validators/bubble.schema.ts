@@ -14,17 +14,25 @@ import {
   DEFAULT_TEXT_CASE,
 } from "../config/generation.js";
 
-const FONT_COLOR_MESSAGE =
-  'fontColor must be a 6-digit hex colour like "#1a1a1a" — shorthand, alpha and colour names are not accepted';
-
 // Regex FIRST, lowercase SECOND. Validating before transforming means a pasted
 // "#FFAA00" is accepted and normalised rather than reported as malformed, while
 // genuinely bad input still fails against the original string the client sent.
-export const fontColorSchema = z
-  .string()
-  .trim()
-  .regex(FONT_COLOR_PATTERN, FONT_COLOR_MESSAGE)
-  .transform((value) => value.toLowerCase());
+//
+// A factory rather than one schema so the error names the field that failed —
+// fontColor and nameColor share the rule but a bad nameColor must not report
+// itself as "fontColor must be…".
+export function hexColorSchema(fieldName: string) {
+  return z
+    .string()
+    .trim()
+    .regex(
+      FONT_COLOR_PATTERN,
+      `${fieldName} must be a 6-digit hex colour like "#1a1a1a" — shorthand, alpha and colour names are not accepted`
+    )
+    .transform((value) => value.toLowerCase());
+}
+
+export const fontColorSchema = hexColorSchema("fontColor");
 
 /**
  * The geometry and styling fields shared by every schema that describes a
@@ -58,6 +66,9 @@ export const bubbleGeometryFields = {
     .max(MAX_FONT_SIZE, `fontSize cannot exceed ${MAX_FONT_SIZE}`)
     .default(DEFAULT_FONT_SIZE),
   fontColor: fontColorSchema.default(DEFAULT_FONT_COLOR),
+  // Colour for the {name} part of the dialogue only. null = same as fontColor,
+  // which is also what every bubble created before this field existed has.
+  nameColor: hexColorSchema("nameColor").nullable().default(null),
   textAlign: z.enum(TEXT_ALIGNS).default(DEFAULT_TEXT_ALIGN),
   textVerticalAlign: z
     .enum(TEXT_VERTICAL_ALIGNS)
@@ -135,6 +146,10 @@ export const updateBubbleSchema = z
     // Optional, never nullable: the column is NOT NULL, so "clear the colour"
     // is not a thing a client can express — it sets #000000 instead.
     fontColor: fontColorSchema.optional(),
+    // Unlike fontColor, nameColor IS nullable: null is how the client says
+    // "same as the text colour" (the column is nullable for exactly that).
+    // Omitted = unchanged, null = reset, "#rrggbb" = set.
+    nameColor: hexColorSchema("nameColor").nullable().optional(),
     // Same rule as fontColor: optional, never nullable. These columns are NOT
     // NULL, so "unset the alignment" means sending CENTER, not null.
     textAlign: z.enum(TEXT_ALIGNS).optional(),
