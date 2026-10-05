@@ -13,7 +13,9 @@ import { AppError, ValidationError } from "../utils/errors.js";
 // and runpodClient.ts.
 //
 // Sender identity is fixed per environment (config.email.fromAddress +
-// fromName). Individual calls only specify recipient, subject, and body.
+// fromName). The reply-to address is fixed too (REPLY_TO_ADDRESS below,
+// hardcoded by decision). Individual calls only specify recipient, subject,
+// and body.
 //
 // Retry policy:
 //   2 attempts total (1 real try + 1 retry) with 500ms backoff.
@@ -23,6 +25,13 @@ import { AppError, ValidationError } from "../utils/errors.js";
 
 const MAX_SEND_ATTEMPTS = 2;
 const SEND_RETRY_DELAY_MS = 500;
+
+// Where customer replies go. Every email is sent FROM noreply@unilakekids.com,
+// which has no inbox (the domain has no MX record), so without this a reply
+// bounces. The templates in notification.service.ts invite customers to reply
+// ("Reply to this email and our team will get back to you"), so this must
+// point at a mailbox someone reads. Hardcoded by decision — change it here.
+const REPLY_TO_ADDRESS = "unilake.books@gmail.com";
 
 // Single Resend client instance, reused across all sends. SDK is thread-safe.
 const resendClient = new Resend(config.email.resendApiKey);
@@ -155,6 +164,7 @@ export async function sendEmail(
       const { data, error } = await resendClient.emails.send({
         from,
         to: params.to,
+        replyTo: REPLY_TO_ADDRESS,
         subject: params.subject,
         html: params.html,
         text,

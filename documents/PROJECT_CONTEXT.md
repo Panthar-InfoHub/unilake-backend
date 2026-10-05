@@ -114,6 +114,7 @@ Never assume a task is done just because it was discussed — check CURRENT_STAT
 | Google Cloud Run | — | **Former** backend host | Migrated off Aug 22. The `Dockerfile` is still Cloud Run–shaped (`EXPOSE 8080`, `server.listen(process.env.PORT)`), so moving back would need **no URL changes at all** — only the platform settings: CPU always-allocated, `--min-instances 1`, `--max-instances 1`, `--timeout 3600`. |
 | Razorpay | `razorpay` npm SDK | Payments | Integrated Aug 19. Singleton + `toSmallestUnit()` + `verifyWebhookSignature()` in `src/lib/razorpay.ts`. Webhook-only (no client-side verify endpoint). Currency-agnostic by design. International account still awaiting client approval. |
 | Shiprocket | — | Shipping | Country name format vs ISO codes = unresolved |
+| Resend | `resend` npm SDK | Transactional email | Single entry point `sendEmail()` in `src/lib/email.ts`. Sends FROM `noreply@unilakekids.com` (domain verified via DKIM `resend._domainkey` + SPF/MX on `send.unilakekids.com`). **Reply-To is hardcoded to `unilake.books@gmail.com`** (`REPLY_TO_ADDRESS`) because the domain has no MX record and replies to `noreply@` would bounce — see DECISIONS.md. |
 | pdf-lib | Installed Aug 21 | PDF compilation | Used in `compilePdfForSession` (session.service) and `pdfWorker`. Embeds JPEG-converted page images sized to source dimensions. |
 | Apidog | — | API testing | Not automated tests |
 

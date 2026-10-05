@@ -491,6 +491,13 @@
 - **Never drive a mount animation with a CSS transition flipped from an effect** — it only animates if the browser painted the start value in an earlier frame; when it doesn't, the bar snaps to full. Use `@keyframes`.
 - **Callbacks passed to a timer-owning child go through a ref, not effect deps.** The parent passes an inline arrow and re-renders constantly (TanStack polls, WS events); depending on it restarted the timer every time. Fixing it in the parent instead would silently regress on the next edit.
 
+## Transactional email reply-to (added Oct 5)
+
+- **Every email carries `Reply-To: unilake.books@gmail.com`** (the client's Gmail). Set once in `sendEmail()` in `src/lib/email.ts` (`REPLY_TO_ADDRESS`), so all six customer notifications get it.
+- **Why:** mail is sent FROM `noreply@unilakekids.com` via Resend, and the domain has **no MX record** — nothing receives mail for it, so a reply bounced. The templates already invite replies ("Reply to this email and our team will get back to you"), so the promise was broken until this.
+- **Hardcoded by decision, not an env var.** To change the address, edit the constant and redeploy.
+- **Covers Reply only.** Someone who composes a fresh email to `noreply@` / `support@unilakekids.com` still bounces; that needs inbound routing on the domain (e.g. Cloudflare Email Routing → the same Gmail), which is DNS-only and not done.
+
 ---
 
 ## SUPERSEDED
