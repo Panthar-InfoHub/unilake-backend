@@ -217,6 +217,11 @@ import {
   getStatsSummaryHandler,
   getStatsTimeseriesHandler,
 } from "../controllers/stats.controller.js";
+import {
+  listAdminUsersHandler,
+  updateUserRoleHandler,
+} from "../controllers/user.controller.js";
+import { updateUserRoleSchema } from "../validators/user.schema.js";
 
 const router = Router();
 
@@ -528,6 +533,16 @@ router.post(
 );
 router.post("/orders/:orderId/retry-shiprocket", retryShiprocketHandler);
 router.post("/orders/:orderId/refresh-tracking", refreshTrackingHandler);
+
+// USERS (admin user management)
+// List every account; promote/demote. No ordering hazard: the PATCH has a
+// literal 3rd segment (/role) and there is no other /users/:userId route.
+router.get("/users", listAdminUsersHandler);
+router.patch(
+  "/users/:userId/role",
+  validateBody(updateUserRoleSchema),
+  updateUserRoleHandler
+);
 
 // SITE PAGES (privacy / terms / refund)
 // No create or delete: the slug set is fixed by the SitePageSlug enum, so the

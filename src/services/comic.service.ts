@@ -551,7 +551,11 @@ export const getPublicComicsList = async (filters: ComicFilterQueryInput) => {
         },
       },
     },
-    orderBy: { createdAt: "desc" },
+    // Bestsellers first, then everything else; newest first within each
+    // group. `desc` on a boolean puts true before false. This single ordering
+    // drives every storefront listing — the home page grid, /comic, and the
+    // "Explore More Books" picks on a comic page — so they always agree.
+    orderBy: [{ isBestseller: "desc" }, { createdAt: "desc" }],
   });
 };
 

@@ -29,7 +29,10 @@ import { submitAndAwaitResult } from "./sd/runpodClient.js";
 import { acquirePhoto, releasePhoto } from "./sd/photoCache.js";
 import { buildDisplayImage } from "../../lib/image.js";
 import sharp from "sharp";
-import { notifyGenerationSuccess } from "../../services/notification.service.js";
+import {
+  notifyBookReady,
+  notifyPreviewReady,
+} from "../../services/notification.service.js";
 
 type GeneratePageJobData = {
   pageVersionId: string;
@@ -568,6 +571,14 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
         "[SD Worker] All preview pages done — session marked PREVIEW_READY"
       );
       emitSessionPreviewReady(sessionId);
+      // Exactly once: "ready" is only returned by the one worker whose
+      // status-guarded updateMany won the GENERATING_PREVIEW → PREVIEW_READY flip.
+      notifyPreviewReady(sessionId).catch((err) => {
+        logger.error(
+          { sessionId, err },
+          "[SD Worker] notifyPreviewReady failed (swallowed)"
+        );
+      });
     }
 
     // === 9. CHECK IF THIS WAS THE LAST PAID PAGE ===
@@ -589,10 +600,11 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
         "[SD Worker] All paid pages done — session marked PAID_PAGES_READY, Order marked GENERATED"
       );
       emitSessionPaidReady(sessionId);
-      notifyGenerationSuccess(sessionId).catch((err) => {
+      // Exactly once — same status-guarded-flip reasoning as the preview email.
+      notifyBookReady(sessionId).catch((err) => {
         logger.error(
           { sessionId, err },
-          "[SD Worker] notifyGenerationSuccess failed (swallowed)"
+          "[SD Worker] notifyBookReady failed (swallowed)"
         );
       });
     }
@@ -655,7 +667,7 @@ async function processJob(job: Job<GeneratePageJobData>): Promise<void> {
 export const generationWorker = new Worker<GeneratePageJobData>(
   "sd-generation",
   processJob,
-  { connection: redisClient, concurrency: 5 }
+  { connection: redisClient, concurrency: 5}
 );
 
 generationWorker.on("failed", async (job, err) => {
@@ -718,6 +730,12 @@ generationWorker.on("failed", async (job, err) => {
         "[SD Worker] Session marked PREVIEW_READY from failure handler (last page failed but earlier pages covered the total)"
       );
       emitSessionPreviewReady(pageVersion.orderSessionId);
+      notifyPreviewReady(pageVersion.orderSessionId).catch((err) => {
+        logger.error(
+          { sessionId: pageVersion.orderSessionId, err },
+          "[SD Worker] notifyPreviewReady failed (swallowed)"
+        );
+      });
     }
     // Mirror check for paid pages. Same rationale as the preview branch
     // above — the helper whose isPreviewPage filter doesn't match this
@@ -742,10 +760,10 @@ generationWorker.on("failed", async (job, err) => {
         "[SD Worker] Session marked PAID_PAGES_READY from failure handler (last page failed but earlier pages covered the total)"
       );
       emitSessionPaidReady(pageVersion.orderSessionId);
-      notifyGenerationSuccess(pageVersion.orderSessionId).catch((err) => {
+      notifyBookReady(pageVersion.orderSessionId).catch((err) => {
         logger.error(
           { sessionId: pageVersion.orderSessionId, err },
-          "[SD Worker] notifyGenerationSuccess failed (swallowed)"
+          "[SD Worker] notifyBookReady failed (swallowed)"
         );
       });
     }

@@ -342,7 +342,10 @@ export type CreateOrderParams = {
   };
 
   item: {
-    /** Comic title — shows on the shipping label. */
+    /**
+     * Product name — shows on the shipping label. Built by the service as
+     * `[Child Name]_[HARDCOVER|SOFTCOVER]_[Book Title]`.
+     */
     name: string;
     /** Stable identifier; comicId is fine. */
     sku: string;

@@ -32,6 +32,7 @@ const requriedVariables = [
   "RESEND_API_KEY",
   "EMAIL_FROM_ADDRESS",
   "EMAIL_FROM_NAME",
+  "FRONTEND_URL",
 ] as const;
 
 for (const envVar of requriedVariables) {
@@ -53,6 +54,12 @@ export const config = {
   betterAuthUrl: process.env.BETTER_AUTH_URL as string,
   facebookId: process.env.FACEBOOK_CLIENT_ID as string,
   facebookSecret: process.env.FACEBOOK_CLIENT_SECRET as string,
+  // Public origin of the Next.js frontend, used to build links in customer
+  // emails. Trailing slashes are stripped so `${frontendUrl}/path` never
+  // doubles them. Local: http://localhost:3000. Production:
+  // https://www.unilakekids.com — never the *.vercel.app domain, where login
+  // does not work.
+  frontendUrl: (process.env.FRONTEND_URL as string).replace(/\/+$/, ""),
   r2: {
     accountId: process.env.R2_ACCOUNT_ID as string,
     accessKeyId: process.env.R2_ACCESS_KEY_ID as string,

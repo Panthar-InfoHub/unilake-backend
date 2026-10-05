@@ -5,6 +5,7 @@ import { enqueuePaidGenerationJobs } from "./session.service.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { config } from "../config/env.js";
 import { processShiprocketStatusUpdate } from "./shiprocket.service.js";
+import { notifyPaymentReceived } from "./notification.service.js";
 
 /**
  * Handle an incoming Razorpay webhook.
@@ -201,10 +202,9 @@ async function handlePaymentCaptured(
 
   // Enqueue paid-page generation OUTSIDE the transaction.
   // Never enqueue inside $transaction (Redis doesn't roll back with Prisma).
-    const jobsEnqueued = await enqueuePaidGenerationJobs(
+  const jobsEnqueued = await enqueuePaidGenerationJobs(
     order.orderSessionId,
-    order.orderSession.comicId,
-    order.orderSession.createdAt
+    order.orderSession.comicId
   ).catch(async (error) => {
     await prisma.webhookEvent
       .delete({ where: { eventId } })
@@ -217,15 +217,18 @@ async function handlePaymentCaptured(
         );
       });
 
+    // `err`, not `error`: pino only runs its Error serializer on the `err` key.
+    // Under any other key an Error has no enumerable fields and logs as `{}` —
+    // which is how a BullMQ priority overflow passed for a vague Redis problem.
     logger.error(
-      { orderId: order.id, error },
+      { orderId: order.id, err: error },
       "Paid-page enqueue failed — re-throwing so Razorpay retries the webhook"
     );
     throw error;
   });
 
   // Flip session to GENERATING_PAID once jobs are in Redis
-  await prisma.orderSession.updateMany({
+  const { count: generationStarted } = await prisma.orderSession.updateMany({
     where: { id: order.orderSessionId, status: "PAID" },
     data: { status: "GENERATING_PAID" },
   });
@@ -234,6 +237,20 @@ async function handlePaymentCaptured(
     { orderId: order.id, jobsEnqueued },
     "Paid-page generation enqueued after payment"
   );
+
+  // Payment-received email — exactly once. Only the delivery whose guarded
+  // PAID → GENERATING_PAID flip actually matched sends it: a retry after a
+  // failed enqueue never reached this line the first time, and any later
+  // duplicate finds the session already past PAID (count 0). Fire-and-forget,
+  // so a Resend outage can never make Razorpay retry the webhook.
+  if (generationStarted > 0) {
+    notifyPaymentReceived(order.orderSessionId).catch((err) => {
+      logger.error(
+        { orderId: order.id, err },
+        "notifyPaymentReceived failed (swallowed)"
+      );
+    });
+  }
 }
 
 export class WebhookVerificationError extends Error {

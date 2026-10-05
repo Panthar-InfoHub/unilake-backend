@@ -26,6 +26,7 @@ import {
 } from "../config/generation.js";
 import { pdfCompilationQueue } from "../jobs/queues.js";
 import type { SendToPrintInput } from "../validators/sendToPrint.schema.js";
+import { notifySentToPrint } from "./notification.service.js";
 
 /**
  * Statuses meaning "the customer has paid."
@@ -39,23 +40,129 @@ export const POST_PAYMENT_STATUSES: OrderSessionStatus[] = [
 ];
 
 /**
- * Statuses that are exempt from the 24h expiry rule.
+ * How long an unpaid session lives, counted from creation. Written once into
+ * `OrderSession.expiresAt` by createOrderSession and never extended, so a change
+ * here applies to new sessions only.
+ *
+ * ⚠️ The frontend carries its own copy of this window — the localStorage TTL in
+ * `app/lib/session-storage.ts` and the "Previews are kept for…" message on the
+ * preview page. Two repos, so change all three together.
+ */
+const SESSION_LIFETIME_DAYS = 7;
+const SESSION_LIFETIME_MS = SESSION_LIFETIME_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Statuses that are exempt from session expiry.
  * Includes AWAITING_PAYMENT (customer is at the Razorpay modal — don't kill
- * their session mid-payment) plus every post-payment status (per the locked
- * decision: no expiry after payment; session lives until send-to-print).
+ * their session mid-payment) plus every status after payment (per the locked
+ * decision: no expiry after payment).
+ *
+ * The post-send-to-print statuses are listed here explicitly rather than added
+ * to POST_PAYMENT_STATUSES, because that list also drives the regeneration cap
+ * and the post-payment field lock. Without them, a printed book's session
+ * expired like an unpaid one: the customer's "View your book" link showed
+ * "expired", and the hourly sweeper overwrote PDF_FAILED / SHIPMENT_FAILED
+ * with a plain FAILED, losing which step had failed.
  */
 export const EXPIRY_EXEMPT_STATUSES: OrderSessionStatus[] = [
   "AWAITING_PAYMENT",
   ...POST_PAYMENT_STATUSES,
+  "COMPILING_PDF",
+  "PDF_FAILED",
+  "SHIPMENT_QUEUED",
+  "SHIPMENT_FAILED",
+  "COMPLETED",
 ];
 
-function computeJobPriority(
-  sessionCreatedAt: Date,
-  pageNumber: number
-): number {
-  const sessionSecondsInDay =
-    Math.floor(sessionCreatedAt.getTime() / 1000) % 86_400;
-  return sessionSecondsInDay + pageNumber * 80_000;
+/** BullMQ's hard ceiling on `priority` (2^21 − 1). Anything above throws on add. */
+const MAX_BULLMQ_PRIORITY = 2_097_151;
+
+/**
+ * BullMQ priority for one page job: the page number itself.
+ *
+ * Lower runs first, and BullMQ breaks ties in insertion order (FIFO). So every
+ * session's page 1 runs before anyone's page 2, and on the same page number the
+ * session that queued first wins — books advance side by side instead of one
+ * customer's whole book blocking the next.
+ *
+ * Replaces `secondsInDay + pageNumber * 80_000`, which assumed ≤ 24 pages:
+ * page 26 crossed the 21-bit ceiling for most of the day and page 27+ always
+ * did, so every page past 25 threw "Priority should be between 0 and 2097152"
+ * and a 49-page book could never finish. It also mis-ordered sessions across
+ * the midnight-UTC wrap.
+ */
+function computeJobPriority(pageNumber: number): number {
+  return Math.min(Math.max(pageNumber, 1), MAX_BULLMQ_PRIORITY);
+}
+
+/** States in which a job is still going to run — re-adding it would duplicate work. */
+const LIVE_JOB_STATES = new Set([
+  "active",
+  "waiting",
+  "delayed",
+  "prioritized",
+  "waiting-children",
+]);
+
+/**
+ * Of the given reused PageVersion rows, return the ids that still need a job.
+ *
+ * Every page job uses `jobId = pageVersionId`, so BullMQ ignores a second add of
+ * the same page — that is what stops a webhook retry from generating (and paying
+ * RunPod for) the same page twice. The catch: BullMQ keeps finished jobs around
+ * (completed 24h, failed 7 days, see queues.ts), and an add whose jobId matches a
+ * finished job is ALSO silently ignored. A row being re-queued after a failure
+ * would then never run. So:
+ *   - live job (waiting / active / …)  → skip, it is already queued
+ *   - finished job (completed / failed) → remove it so the new add goes through
+ *   - no job                            → needs one
+ *
+ * Only reused rows can have an old job; freshly created rows have brand-new ids.
+ */
+async function filterRowsNeedingJobs(rowIds: string[]): Promise<Set<string>> {
+  const needed = new Set<string>();
+
+  await Promise.all(
+    rowIds.map(async (id) => {
+      const existing = await sdGenerationQueue.getJob(id);
+      if (!existing) {
+        needed.add(id);
+        return;
+      }
+
+      const state = await existing.getState();
+      if (LIVE_JOB_STATES.has(state)) return;
+
+      await existing.remove();
+      needed.add(id);
+    })
+  );
+
+  return needed;
+}
+
+/**
+ * Add one generation job per row in a SINGLE Redis call.
+ *
+ * `addBulk` instead of N parallel `add`s: one round trip rather than a burst,
+ * and the batch goes in whole or not at all — the parallel version left books
+ * half-queued when some adds threw and others had already landed.
+ */
+async function addPageJobs(
+  rows: { pageVersionId: string; pageNumber: number }[]
+): Promise<void> {
+  if (rows.length === 0) return;
+
+  await sdGenerationQueue.addBulk(
+    rows.map((row) => ({
+      name: "generate-page",
+      data: { pageVersionId: row.pageVersionId },
+      opts: {
+        jobId: row.pageVersionId,
+        priority: computeJobPriority(row.pageNumber),
+      },
+    }))
+  );
 }
 /**
  * Throws if the session is past expiresAt; also flips it to FAILED so future reads
@@ -130,7 +237,7 @@ export async function createOrderSession(
     throw new NotFoundError("Comic not found");
   }
 
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + SESSION_LIFETIME_MS);
 
   return prisma.orderSession.create({
     data: {
@@ -479,8 +586,7 @@ function isSessionCompleteForGeneration(
 async function enqueuePreviewGenerationJobs(
   orderSessionId: string,
   comicId: string,
-  freePreviewPages: number,
-  sessionCreatedAt: Date
+  freePreviewPages: number
 ): Promise<number> {
   // STEP 1: Find the pages that are explicitly marked as preview pages.
   //
@@ -568,15 +674,26 @@ async function enqueuePreviewGenerationJobs(
   // Step 4: Work out which rows actually need a job.
   //
   // A reused row that already reached SD_READY is finished — re-queueing it
-  // would only make the worker re-emit page:ready for no reason. Everything
-  // else (QUEUED orphans, FAILED rows, rows stranded mid-pipeline) gets reset
-  // to QUEUED so the DB reflects that they are waiting again.
-  const rowsToEnqueue = [...existingRows, ...createdRows].filter(
+  // would only make the worker re-emit page:ready for no reason. A reused row
+  // whose job is still live in Redis is already being handled — re-queueing it
+  // would generate the page twice. Everything else (QUEUED orphans, FAILED
+  // rows, rows stranded mid-pipeline) gets reset to QUEUED so the DB reflects
+  // that they are waiting again.
+  const createdIds = new Set(createdRows.map((row) => row.id));
+  const unfinishedRows = [...existingRows, ...createdRows].filter(
     (row) => row.status !== "SD_READY"
   );
 
-  const staleRowIds = existingRows
-    .filter((row) => row.status !== "SD_READY" && row.status !== "QUEUED")
+  const reusedNeedingJobs = await filterRowsNeedingJobs(
+    unfinishedRows.filter((row) => !createdIds.has(row.id)).map((row) => row.id)
+  );
+
+  const rowsToEnqueue = unfinishedRows.filter(
+    (row) => createdIds.has(row.id) || reusedNeedingJobs.has(row.id)
+  );
+
+  const staleRowIds = rowsToEnqueue
+    .filter((row) => row.status !== "QUEUED")
     .map((row) => row.id);
 
   if (staleRowIds.length > 0) {
@@ -586,7 +703,7 @@ async function enqueuePreviewGenerationJobs(
     });
   }
 
-  // Step 5: Enqueue BullMQ jobs — one per row, with priority.
+  // Step 5: Enqueue BullMQ jobs — one per row, with priority, in one call.
   // Runs AFTER all DB writes commit, so a Redis failure here can't
   // orphan the DB rows in an inconsistent state.
   //
@@ -595,21 +712,19 @@ async function enqueuePreviewGenerationJobs(
   // previewPages would silently attach the wrong priority to the wrong page.
   const pageById = new Map(previewPages.map((page) => [page.id, page]));
 
-  const enqueuePromises = rowsToEnqueue.map((row) => {
-    const page = pageById.get(row.pageId)!;
-    const priority = computeJobPriority(sessionCreatedAt, page.pageNumber);
-
-    return sdGenerationQueue.add(
-      "generate-page",
-      { pageVersionId: row.id },
-      { priority }
-    );
-  });
-
-  await Promise.all(enqueuePromises);
+  await addPageJobs(
+    rowsToEnqueue.map((row) => ({
+      pageVersionId: row.id,
+      pageNumber: pageById.get(row.pageId)!.pageNumber,
+    }))
+  );
 
   logger.info(
-    { orderSessionId, jobCount: rowsToEnqueue.length },
+    {
+      orderSessionId,
+      jobCount: rowsToEnqueue.length,
+      alreadyQueued: unfinishedRows.length - rowsToEnqueue.length,
+    },
     "Preview generation jobs enqueued"
   );
 
@@ -650,8 +765,7 @@ export async function triggerGeneration(sessionId: string) {
   const jobsEnqueued = await enqueuePreviewGenerationJobs(
     sessionId,
     session.comicId,
-    session.comic.freePreviewPages,
-    session.createdAt
+    session.comic.freePreviewPages
   );
 
   await prisma.orderSession.update({
@@ -752,13 +866,9 @@ export async function regeneratePage(sessionId: string, pageNumber: number) {
     }
   }
 
-  const priority = computeJobPriority(session.createdAt, page.pageNumber);
-
-  await sdGenerationQueue.add(
-    "generate-page",
-    { pageVersionId: newRow.id },
-    { priority }
-  );
+  await addPageJobs([
+    { pageVersionId: newRow.id, pageNumber: page.pageNumber },
+  ]);
 
   logger.info(
     { sessionId, pageNumber, variantIndex: newRow.variantIndex },
@@ -800,8 +910,7 @@ export async function attachUserToSession(sessionId: string, userId: string) {
 
 async function enqueuePaidGenerationJobs(
   orderSessionId: string,
-  comicId: string,
-  sessionCreatedAt: Date
+  comicId: string
 ): Promise<number> {
   // Paid pages = every page NOT flagged as preview.
   const paidPages = await prisma.page.findMany({
@@ -859,12 +968,24 @@ async function enqueuePaidGenerationJobs(
         )
       : [];
 
-  const rowsToEnqueue = [...existingRows, ...createdRows].filter(
+  // Same selection as the preview path — see its Step 4 for the reasoning.
+  // On a Razorpay webhook retry this is what stops pages that are still
+  // queued from the first attempt being generated a second time.
+  const createdIds = new Set(createdRows.map((row) => row.id));
+  const unfinishedRows = [...existingRows, ...createdRows].filter(
     (row) => row.status !== "SD_READY"
   );
 
-  const staleRowIds = existingRows
-    .filter((row) => row.status !== "SD_READY" && row.status !== "QUEUED")
+  const reusedNeedingJobs = await filterRowsNeedingJobs(
+    unfinishedRows.filter((row) => !createdIds.has(row.id)).map((row) => row.id)
+  );
+
+  const rowsToEnqueue = unfinishedRows.filter(
+    (row) => createdIds.has(row.id) || reusedNeedingJobs.has(row.id)
+  );
+
+  const staleRowIds = rowsToEnqueue
+    .filter((row) => row.status !== "QUEUED")
     .map((row) => row.id);
 
   if (staleRowIds.length > 0) {
@@ -876,21 +997,19 @@ async function enqueuePaidGenerationJobs(
 
   const pageById = new Map(paidPages.map((page) => [page.id, page]));
 
-  const enqueuePromises = rowsToEnqueue.map((row) => {
-    const page = pageById.get(row.pageId)!;
-    const priority = computeJobPriority(sessionCreatedAt, page.pageNumber);
-
-    return sdGenerationQueue.add(
-      "generate-page",
-      { pageVersionId: row.id },
-      { priority }
-    );
-  });
-
-  await Promise.all(enqueuePromises);
+  await addPageJobs(
+    rowsToEnqueue.map((row) => ({
+      pageVersionId: row.id,
+      pageNumber: pageById.get(row.pageId)!.pageNumber,
+    }))
+  );
 
   logger.info(
-    { orderSessionId, jobCount: rowsToEnqueue.length },
+    {
+      orderSessionId,
+      jobCount: rowsToEnqueue.length,
+      alreadyQueued: unfinishedRows.length - rowsToEnqueue.length,
+    },
     "Paid generation jobs enqueued"
   );
 
@@ -1173,6 +1292,18 @@ export async function sendToPrint(
     { sessionId, orderId, selectionCount: input.selections.length },
     "Send-to-print committed — session + order flipped to CONFIRMED"
   );
+
+  // Sent-to-print email — exactly once. Only this fresh-commit path sends it:
+  // the transaction above refuses a second commit, and every later call takes
+  // the CONFIRMED retry branch at the top, which does not email. Sent before
+  // the PDF enqueue on purpose — the commit is the event, and a failed enqueue
+  // the customer retries must not produce a second email.
+  notifySentToPrint(sessionId).catch((err) => {
+    logger.error(
+      { sessionId, orderId, err },
+      "notifySentToPrint failed (swallowed)"
+    );
+  });
 
   // 6. Enqueue PDF compilation OUTSIDE the transaction. Redis never inside
   // $transaction (Redis doesn't roll back with Prisma).

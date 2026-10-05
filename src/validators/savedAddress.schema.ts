@@ -1,10 +1,14 @@
 import { z } from "zod";
 
+// Address line 2 is required for every NEW or EDITED address. Addresses saved
+// before this rule may still have it null in the DB; they stay usable at
+// checkout (a business decision), and editing one only requires line2 if the
+// edit touches it — update keeps it optional, but never empty or null.
 export const createAddressSchema = z.object({
   label: z.string().min(1).max(50).optional(),
   name: z.string().min(1, "Recipient name is required").max(100),
   line1: z.string().min(1, "Address line 1 is required").max(200),
-  line2: z.string().max(200).optional(),
+  line2: z.string().trim().min(1, "Address line 2 is required").max(200),
   city: z.string().min(1, "City is required").max(100),
   state: z.string().min(1, "State is required").max(100),
   zip: z.string().min(1, "ZIP/postal code is required").max(20),
@@ -13,10 +17,11 @@ export const createAddressSchema = z.object({
 });
 
 export const updateAddressSchema = z.object({
-  label: z.string().min(1).max(50).optional(),
+  // null clears the label; an empty string is still rejected.
+  label: z.string().min(1).max(50).nullable().optional(),
   name: z.string().min(1).max(100).optional(),
   line1: z.string().min(1).max(200).optional(),
-  line2: z.string().max(200).nullable().optional(),
+  line2: z.string().trim().min(1, "Address line 2 is required").max(200).optional(),
   city: z.string().min(1).max(100).optional(),
   state: z.string().min(1).max(100).optional(),
   zip: z.string().min(1).max(20).optional(),

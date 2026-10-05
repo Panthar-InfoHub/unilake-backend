@@ -1,30 +1,81 @@
 import { prisma } from "../lib/prisma.js";
 import { logger } from "../lib/logger.js";
 import { sendEmail } from "../lib/email.js";
-import { NotFoundError } from "../utils/errors.js";
-import { trackByAwb } from "../lib/shiprocket.js";
+import { config } from "../config/env.js";
 
 // ============================================================
 // NOTIFICATION SERVICE — Layer 3
 // ============================================================
 //
-// Five transactional emails to customers, triggered by events in the
-// system. Not endpoints. Called from workers, webhook handlers, and
-// admin flows via Layer 4 wiring.
+// Six transactional emails to the customer, one per milestone:
 //
-// Every function follows the same shape:
+//   1. notifyPreviewReady      — free preview pages finished      → preview link
+//   2. notifyPaymentReceived   — Razorpay payment captured        → preview link
+//   3. notifyBookReady         — every paid page finished         → preview link
+//   4. notifySentToPrint       — customer committed send-to-print → preview link
+//   5. notifyAwbGenerated      — admin packed it, AWB assigned    → tracking link
+//   6. notifyOrderDelivered    — Shiprocket reported delivery
+//
+// Not endpoints. Called fire-and-forget from workers, webhook handlers and
+// admin flows. Every function follows the same shape:
 //   1. Load the minimum data needed for the email
 //   2. Build subject + HTML via a template function
 //   3. Send via sendEmail (which handles retries)
-//   4. Return { sent: true, messageId } or { sent: false, reason }
+//   4. Return { sent: true, messageId } or { sent: false, reason } — never throws
 //
-// Callers should wrap invocations in try/catch and swallow — email
-// failure MUST NOT block business logic. See Decision D of the
-// notifyUser design.
+// Callers still attach a .catch() and swallow: email failure MUST NOT block
+// business logic. See Decision D of the notifyUser design.
+//
+// Exactly-once is the CALLER's job — sendEmail is not idempotent. Each call
+// site sits behind a status-guarded flip or webhook dedupe that only one
+// invocation can win; see the comment at each call site.
+//
+// Recipient: OrderSession.notificationEmail, falling back to the Order's
+// checkout-time snapshot. The session copy is deliberately left editable after
+// payment ("never printed"), so it is the customer's latest choice.
 
 // ============================================================
 // SHARED HELPERS
 // ============================================================
+
+/**
+ * Escapes text for safe interpolation into HTML (element content AND quoted
+ * attribute values). Child names come straight from the personalize form, so
+ * an unescaped `<` there would let a customer inject markup into an email we
+ * send under our own domain.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Subjects are plain text, but a newline in a header is never wanted. */
+function cleanSubject(subject: string): string {
+  return subject.replace(/[\r\n]+/g, " ").trim();
+}
+
+/** "Aarav's" — or "Your child's" when the session has no name. Unescaped. */
+function possessive(childName: string | null): string {
+  const name = childName?.trim();
+  return name ? `${name}'s` : "Your child's";
+}
+
+/** The customer's preview page for a session — where links 1–4 land. */
+function previewUrl(sessionId: string): string {
+  return `${config.frontendUrl}/personalize/${encodeURIComponent(sessionId)}/preview`;
+}
+
+/** The session's current address, else the Order's checkout-time copy. */
+function resolveRecipient(
+  sessionEmail: string | null | undefined,
+  orderEmail?: string | null
+): string | null {
+  return sessionEmail?.trim() || orderEmail?.trim() || null;
+}
 
 /**
  * Wraps a per-email body in a consistent header + footer. Keeps all
@@ -40,7 +91,7 @@ function renderEmailShell(bodyHtml: string): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Unilake Book</title>
+    <title>Unilake Kids</title>
   </head>
   <body style="margin:0;padding:0;background:#f4f4f4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#222;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f4;padding:32px 16px;">
@@ -49,7 +100,7 @@ function renderEmailShell(bodyHtml: string): string {
           <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;">
             <tr>
               <td style="padding:32px 40px 16px 40px;border-bottom:1px solid #eee;">
-                <div style="font-size:22px;font-weight:600;color:#1a1a1a;">Unilake Book</div>
+                <div style="font-size:22px;font-weight:600;color:#1a1a1a;">Unilake Kids</div>
               </td>
             </tr>
             <tr>
@@ -60,7 +111,7 @@ function renderEmailShell(bodyHtml: string): string {
             <tr>
               <td style="padding:24px 40px;border-top:1px solid #eee;font-size:13px;color:#888;">
                 <div>Questions? Reply to this email and our team will get back to you.</div>
-                <div style="margin-top:8px;">© Unilake Book</div>
+                <div style="margin-top:8px;">© Unilake Kids</div>
               </td>
             </tr>
           </table>
@@ -73,43 +124,19 @@ function renderEmailShell(bodyHtml: string): string {
 }
 
 /**
- * Resolves the trackingUrl for an order, fetching from Shiprocket
- * on-demand ONLY if it's not yet stored on the Order row. Persists
- * the fetched value so future emails / admin views are fast.
+ * The one call-to-action style used by every email. Inline styles only —
+ * Gmail strips <style> blocks.
  *
- * Returns null if:
- *   - Order has no awbNumber (Phase B never ran — nothing to track)
- *   - Shiprocket returns a "pending" state (AWB assigned but no scans)
- *   - Shiprocket call fails (swallowed — email still sends without link)
+ * The button alone, no raw URL beneath it. Plain-text-only clients still get
+ * the address: htmlToPlainText in lib/email.ts renders every link as
+ * "label: url" when it builds the text part.
  */
-async function resolveTrackingUrl(orderId: string): Promise<string | null> {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    select: { trackingUrl: true, awbNumber: true },
-  });
-
-  if (!order) return null;
-  if (order.trackingUrl) return order.trackingUrl;
-  if (!order.awbNumber) return null;
-
-  // Try to fetch and persist. Swallow errors so email still sends.
-  try {
-    const result = await trackByAwb({ awbCode: order.awbNumber });
-    if (result.state === "tracked" && result.trackUrl) {
-      await prisma.order.update({
-        where: { id: orderId },
-        data: { trackingUrl: result.trackUrl },
-      });
-      return result.trackUrl;
-    }
-    return null;
-  } catch (err) {
-    logger.warn(
-      { orderId, awbNumber: order.awbNumber, err },
-      "[Notification] resolveTrackingUrl — Shiprocket fetch failed, email will send without link"
-    );
-    return null;
-  }
+function renderButton(href: string, label: string): string {
+  return `
+    <p style="margin:24px 0;">
+      <a href="${escapeHtml(href)}" style="display:inline-block;padding:12px 24px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;">${escapeHtml(label)}</a>
+    </p>
+  `.trim();
 }
 
 /**
@@ -132,7 +159,7 @@ async function safeSend(
   html: string
 ): Promise<NotifyResult> {
   try {
-    const result = await sendEmail({ to, subject, html });
+    const result = await sendEmail({ to, subject: cleanSubject(subject), html });
     return { sent: true, messageId: result.messageId };
   } catch (err) {
     logger.error(
@@ -146,297 +173,308 @@ async function safeSend(
   }
 }
 
+/** Everything the session-keyed emails (1–4) need, in one query. */
+async function loadSessionContext(orderSessionId: string) {
+  return prisma.orderSession.findUnique({
+    where: { id: orderSessionId },
+    select: {
+      id: true,
+      notificationEmail: true,
+      childName: true,
+      comic: { select: { title: true } },
+      order: { select: { notificationEmail: true } },
+    },
+  });
+}
+
+/** Everything the order-keyed emails (5–6) need, in one query. */
+async function loadOrderContext(orderId: string) {
+  return prisma.order.findUnique({
+    where: { id: orderId },
+    select: {
+      id: true,
+      notificationEmail: true,
+      courierName: true,
+      awbNumber: true,
+      trackingUrl: true,
+      orderSession: {
+        select: {
+          id: true,
+          notificationEmail: true,
+          childName: true,
+          comic: { select: { title: true } },
+        },
+      },
+    },
+  });
+}
+
 // ============================================================
 // EMAIL TEMPLATES (per-notification body builders)
 // ============================================================
+//
+// Every interpolated value is escaped here, at the point of use — the
+// callers pass raw strings.
 
-function renderGenerationSuccessBody(args: {
-  childName: string;
-  comicTitle: string;
-}): string {
+type BodyArgs = { childName: string | null; comicTitle: string };
+
+function renderPreviewReadyBody(args: BodyArgs & { link: string }): string {
   return `
     <p>Hi,</p>
-    <p><strong>${args.childName}'s comic is ready to preview!</strong></p>
-    <p>The illustrations for <em>${args.comicTitle}</em> have been generated. Log in to see how it looks, make any tweaks, and place your order when you're happy.</p>
-    <p>— The Unilake Book team</p>
+    <p><strong>${escapeHtml(possessive(args.childName))} preview is ready!</strong></p>
+    <p>The first pages of <em>${escapeHtml(args.comicTitle)}</em> have been created. Take a look, pick your favourite version of each page, and order the full book when you're happy.</p>
+    ${renderButton(args.link, "See the preview")}
+    <p>— The Unilake Kids team</p>
   `.trim();
 }
 
-function renderGenerationFailedButPreviousExistsBody(args: {
-  childName: string;
-  comicTitle: string;
-}): string {
+function renderPaymentReceivedBody(args: BodyArgs & { link: string }): string {
   return `
     <p>Hi,</p>
-    <p>The latest regeneration attempt for <strong>${args.childName}'s ${args.comicTitle}</strong> ran into a problem.</p>
-    <p>Good news — your previous version is still there. You can view it, try regenerating again, or reply to this email if you'd like our team to look into it.</p>
-    <p>— The Unilake Book team</p>
+    <p><strong>Thank you — we've received your payment.</strong></p>
+    <p>We're now creating the rest of <em>${escapeHtml(args.comicTitle)}</em>. You can watch the pages appear as they're made — we'll email you again once the whole book is ready.</p>
+    ${renderButton(args.link, "Watch the progress")}
+    <p>— The Unilake Kids team</p>
   `.trim();
 }
 
-function renderPdfReadyBody(args: {
-  childName: string;
-  comicTitle: string;
-}): string {
+function renderBookReadyBody(args: BodyArgs & { link: string }): string {
   return `
     <p>Hi,</p>
-    <p><strong>Great news — ${args.childName}'s book is being prepared for printing!</strong></p>
-    <p>Your final PDF for <em>${args.comicTitle}</em> is ready and we've queued it for print. You'll get another email as soon as it ships.</p>
-    <p>— The Unilake Book team</p>
+    <p><strong>${escapeHtml(possessive(args.childName))} full book is ready!</strong></p>
+    <p>Every page of <em>${escapeHtml(args.comicTitle)}</em> has been created. Go through the book, choose your favourite version of each page, and send it to print.</p>
+    <p>Nothing will be printed until you press <strong>Send to Print</strong>.</p>
+    ${renderButton(args.link, "Choose your pages")}
+    <p>— The Unilake Kids team</p>
   `.trim();
 }
 
-function renderOrderShippedBody(args: {
-  childName: string;
-  comicTitle: string;
-  courierName: string | null;
-  awbNumber: string | null;
-  trackingUrl: string | null;
-}): string {
-  const trackingBlock = args.trackingUrl
-    ? `<p><a href="${args.trackingUrl}" style="display:inline-block;padding:12px 24px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;">Track your shipment</a></p>`
-    : `<p>You'll be able to track your shipment once the courier's first scan comes through.</p>`;
+function renderSentToPrintBody(args: BodyArgs & { link: string }): string {
+  return `
+    <p>Hi,</p>
+    <p><strong>${escapeHtml(possessive(args.childName))} book is off to print!</strong></p>
+    <p>We've received your final pages for <em>${escapeHtml(args.comicTitle)}</em> and are preparing them for printing. We'll email you again as soon as it's packed and ready to ship.</p>
+    ${renderButton(args.link, "View your book")}
+    <p>— The Unilake Kids team</p>
+  `.trim();
+}
 
+function renderAwbGeneratedBody(
+  args: BodyArgs & {
+    courierName: string | null;
+    awbNumber: string | null;
+    trackingUrl: string | null;
+  }
+): string {
   const courierLine = args.courierName
-    ? `<p>Courier: <strong>${args.courierName}</strong>${args.awbNumber ? ` &middot; AWB: <code>${args.awbNumber}</code>` : ""}</p>`
+    ? `<p>Courier: <strong>${escapeHtml(args.courierName)}</strong>${
+        args.awbNumber ? ` &middot; AWB: <code>${escapeHtml(args.awbNumber)}</code>` : ""
+      }</p>`
+    : args.awbNumber
+      ? `<p>AWB: <code>${escapeHtml(args.awbNumber)}</code></p>`
+      : "";
+
+  const trackingBlock = args.trackingUrl
+    ? `${renderButton(args.trackingUrl, "Track your parcel")}
+       <p style="font-size:14px;color:#666;">Tracking updates appear once the courier collects the parcel.</p>`
     : "";
 
   return `
     <p>Hi,</p>
-    <p><strong>${args.childName}'s book is on the way!</strong></p>
-    <p>Your copy of <em>${args.comicTitle}</em> has been picked up by the courier and is heading to you.</p>
+    <p><strong>${escapeHtml(possessive(args.childName))} book is packed and ready to ship!</strong></p>
+    <p>Your copy of <em>${escapeHtml(args.comicTitle)}</em> has been printed, packed, and booked with the courier for pickup.</p>
     ${courierLine}
     ${trackingBlock}
-    <p>— The Unilake Book team</p>
+    <p>— The Unilake Kids team</p>
   `.trim();
 }
 
-function renderOrderDeliveredBody(args: {
-  childName: string;
-  comicTitle: string;
-}): string {
+function renderOrderDeliveredBody(args: BodyArgs): string {
   return `
     <p>Hi,</p>
-    <p><strong>${args.childName}'s book has arrived!</strong></p>
-    <p>We hope <em>${args.comicTitle}</em> brings a big smile. If anything's not right with your copy, just reply to this email — we'll sort it out.</p>
+    <p><strong>${escapeHtml(possessive(args.childName))} book has arrived!</strong></p>
+    <p>We hope <em>${escapeHtml(args.comicTitle)}</em> brings a big smile. If anything's not right with your copy, just reply to this email — we'll sort it out.</p>
     <p>Would love to see a photo if you feel like sharing!</p>
-    <p>— The Unilake Book team</p>
+    <p>— The Unilake Kids team</p>
   `.trim();
 }
 
 // ============================================================
-// PUBLIC API — the 5 notification functions
+// PUBLIC API — one function per milestone
 // ============================================================
 
 /**
- * Fires after generation (or regeneration) completes successfully.
- * Called from the RunPod worker.
+ * 1. Free preview pages finished. Pre-payment, so there is no Order — the
+ * session's address is the only one.
+ * Caller: generationWorker, on maybeMarkPreviewComplete → "ready".
  */
-export async function notifyGenerationSuccess(
+export async function notifyPreviewReady(
   orderSessionId: string
 ): Promise<NotifyResult> {
-  const session = await prisma.orderSession.findUnique({
-    where: { id: orderSessionId },
-    select: {
-      notificationEmail: true,
-      childName: true,
-      comic: { select: { title: true } },
-    },
-  });
-
+  const session = await loadSessionContext(orderSessionId);
   if (!session) {
-    logger.warn(
-      { orderSessionId },
-      "[Notification] notifyGenerationSuccess — session not found, skipping"
-    );
+    logger.warn({ orderSessionId }, "[Notification] notifyPreviewReady — session not found, skipping");
     return { sent: false, reason: "session_not_found" };
   }
-  if (!session.notificationEmail) {
-    return { sent: false, reason: "no_recipient_email" };
-  }
 
-  const subject = `${session.childName}'s comic is ready to preview!`;
-  const html = renderEmailShell(
-    renderGenerationSuccessBody({
-      childName: session.childName ?? "your",
-      comicTitle: session.comic.title,
-    })
+  const to = resolveRecipient(session.notificationEmail);
+  if (!to) return { sent: false, reason: "no_recipient_email" };
+
+  return safeSend(
+    to,
+    `${possessive(session.childName)} preview is ready!`,
+    renderEmailShell(
+      renderPreviewReadyBody({
+        childName: session.childName,
+        comicTitle: session.comic.title,
+        link: previewUrl(session.id),
+      })
+    )
   );
-
-  return safeSend(session.notificationEmail, subject, html);
 }
 
 /**
- * Fires when a regeneration attempt fails, but the customer already has
- * a working previous generation. Called from the RunPod worker's failed
- * listener or the RunPod service, depending on which side detects it.
- *
- * If there's no prior successful generation, use a different notification
- * (or none — first-attempt failures may just show in the UI).
+ * 2. Razorpay payment captured and paid-page generation queued.
+ * Caller: webhook.service handlePaymentCaptured, after the GENERATING_PAID flip.
  */
-export async function notifyGenerationFailedButPreviousExists(
+export async function notifyPaymentReceived(
   orderSessionId: string
 ): Promise<NotifyResult> {
-  const session = await prisma.orderSession.findUnique({
-    where: { id: orderSessionId },
-    select: {
-      notificationEmail: true,
-      childName: true,
-      comic: { select: { title: true } },
-    },
-  });
-
+  const session = await loadSessionContext(orderSessionId);
   if (!session) {
-    logger.warn(
-      { orderSessionId },
-      "[Notification] notifyGenerationFailedButPreviousExists — session not found, skipping"
-    );
+    logger.warn({ orderSessionId }, "[Notification] notifyPaymentReceived — session not found, skipping");
     return { sent: false, reason: "session_not_found" };
   }
-  if (!session.notificationEmail) {
-    return { sent: false, reason: "no_recipient_email" };
-  }
 
-  const subject = `Regeneration hit a snag — your previous version is still there`;
-  const html = renderEmailShell(
-    renderGenerationFailedButPreviousExistsBody({
-      childName: session.childName ?? "your child",
-      comicTitle: session.comic.title,
-    })
+  const to = resolveRecipient(session.notificationEmail, session.order?.notificationEmail);
+  if (!to) return { sent: false, reason: "no_recipient_email" };
+
+  return safeSend(
+    to,
+    `Payment received — we're creating ${possessive(session.childName).replace(/^Your/, "your")} book`,
+    renderEmailShell(
+      renderPaymentReceivedBody({
+        childName: session.childName,
+        comicTitle: session.comic.title,
+        link: previewUrl(session.id),
+      })
+    )
   );
-
-  return safeSend(session.notificationEmail, subject, html);
 }
 
 /**
- * Fires when the PDF worker successfully compiles the final PDF.
- * Called from pdfWorker after the compile-and-upload succeeds.
+ * 3. Every paid page finished — the customer now picks variants.
+ * Caller: generationWorker, on maybeMarkPaidReady → "ready" (both the success
+ * path and the failure-with-earlier-success edge).
  */
-export async function notifyPdfReady(orderId: string): Promise<NotifyResult> {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    select: {
-      notificationEmail: true,
-      orderSession: {
-        select: {
-          childName: true,
-          comic: { select: { title: true } },
-        },
-      },
-    },
-  });
+export async function notifyBookReady(
+  orderSessionId: string
+): Promise<NotifyResult> {
+  const session = await loadSessionContext(orderSessionId);
+  if (!session) {
+    logger.warn({ orderSessionId }, "[Notification] notifyBookReady — session not found, skipping");
+    return { sent: false, reason: "session_not_found" };
+  }
 
+  const to = resolveRecipient(session.notificationEmail, session.order?.notificationEmail);
+  if (!to) return { sent: false, reason: "no_recipient_email" };
+
+  return safeSend(
+    to,
+    `${possessive(session.childName)} full book is ready — pick your favourites`,
+    renderEmailShell(
+      renderBookReadyBody({
+        childName: session.childName,
+        comicTitle: session.comic.title,
+        link: previewUrl(session.id),
+      })
+    )
+  );
+}
+
+/**
+ * 4. Customer committed their selections with Send to Print.
+ * Caller: session.service sendToPrint, fresh-commit path only.
+ */
+export async function notifySentToPrint(
+  orderSessionId: string
+): Promise<NotifyResult> {
+  const session = await loadSessionContext(orderSessionId);
+  if (!session) {
+    logger.warn({ orderSessionId }, "[Notification] notifySentToPrint — session not found, skipping");
+    return { sent: false, reason: "session_not_found" };
+  }
+
+  const to = resolveRecipient(session.notificationEmail, session.order?.notificationEmail);
+  if (!to) return { sent: false, reason: "no_recipient_email" };
+
+  return safeSend(
+    to,
+    `${possessive(session.childName)} book is off to print!`,
+    renderEmailShell(
+      renderSentToPrintBody({
+        childName: session.childName,
+        comicTitle: session.comic.title,
+        link: previewUrl(session.id),
+      })
+    )
+  );
+}
+
+/**
+ * 5. Admin entered final dimensions; AWB assigned and pickup scheduled.
+ * Reads Order.trackingUrl, which Phase B writes alongside the AWB.
+ * Caller: shiprocket.service pushDimensionsAssignAwbAndSchedulePickup.
+ */
+export async function notifyAwbGenerated(orderId: string): Promise<NotifyResult> {
+  const order = await loadOrderContext(orderId);
   if (!order) {
-    logger.warn(
-      { orderId },
-      "[Notification] notifyPdfReady — order not found, skipping"
-    );
+    logger.warn({ orderId }, "[Notification] notifyAwbGenerated — order not found, skipping");
     return { sent: false, reason: "order_not_found" };
   }
-  if (!order.notificationEmail) {
-    return { sent: false, reason: "no_recipient_email" };
-  }
 
-  const subject = `${order.orderSession.childName}'s book is being prepared!`;
-  const html = renderEmailShell(
-    renderPdfReadyBody({
-      childName: order.orderSession.childName ?? "your child",
-      comicTitle: order.orderSession.comic.title,
-    })
+  const to = resolveRecipient(order.orderSession.notificationEmail, order.notificationEmail);
+  if (!to) return { sent: false, reason: "no_recipient_email" };
+
+  return safeSend(
+    to,
+    `${possessive(order.orderSession.childName)} book is packed and ready to ship`,
+    renderEmailShell(
+      renderAwbGeneratedBody({
+        childName: order.orderSession.childName,
+        comicTitle: order.orderSession.comic.title,
+        courierName: order.courierName,
+        awbNumber: order.awbNumber,
+        trackingUrl: order.trackingUrl,
+      })
+    )
   );
-
-  return safeSend(order.notificationEmail, subject, html);
 }
 
 /**
- * Fires when the Shiprocket webhook flips Order.status to SHIPPED.
- * Called from processShiprocketStatusUpdate.
- *
- * Includes a tracking link. If Order.trackingUrl is null (webhook fired
- * before refresh-tracking populated it), we fetch on-demand and persist
- * so future calls are fast.
- */
-export async function notifyOrderShipped(orderId: string): Promise<NotifyResult> {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    select: {
-      notificationEmail: true,
-      courierName: true,
-      awbNumber: true,
-      orderSession: {
-        select: {
-          childName: true,
-          comic: { select: { title: true } },
-        },
-      },
-    },
-  });
-
-  if (!order) {
-    logger.warn(
-      { orderId },
-      "[Notification] notifyOrderShipped — order not found, skipping"
-    );
-    return { sent: false, reason: "order_not_found" };
-  }
-  if (!order.notificationEmail) {
-    return { sent: false, reason: "no_recipient_email" };
-  }
-
-  const trackingUrl = await resolveTrackingUrl(orderId);
-
-  const subject = `${order.orderSession.childName}'s book has shipped!`;
-  const html = renderEmailShell(
-    renderOrderShippedBody({
-      childName: order.orderSession.childName ?? "your child",
-      comicTitle: order.orderSession.comic.title,
-      courierName: order.courierName,
-      awbNumber: order.awbNumber,
-      trackingUrl,
-    })
-  );
-
-  return safeSend(order.notificationEmail, subject, html);
-}
-
-/**
- * Fires when the Shiprocket webhook flips Order.status to DELIVERED.
- * Called from processShiprocketStatusUpdate.
+ * 6. Shiprocket webhook flipped Order.status to DELIVERED.
+ * Caller: shiprocket.service processShiprocketStatusUpdate.
  */
 export async function notifyOrderDelivered(
   orderId: string
 ): Promise<NotifyResult> {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    select: {
-      notificationEmail: true,
-      orderSession: {
-        select: {
-          childName: true,
-          comic: { select: { title: true } },
-        },
-      },
-    },
-  });
-
+  const order = await loadOrderContext(orderId);
   if (!order) {
-    logger.warn(
-      { orderId },
-      "[Notification] notifyOrderDelivered — order not found, skipping"
-    );
+    logger.warn({ orderId }, "[Notification] notifyOrderDelivered — order not found, skipping");
     return { sent: false, reason: "order_not_found" };
   }
-  if (!order.notificationEmail) {
-    return { sent: false, reason: "no_recipient_email" };
-  }
 
-  const subject = `${order.orderSession.childName}'s book has arrived!`;
-  const html = renderEmailShell(
-    renderOrderDeliveredBody({
-      childName: order.orderSession.childName ?? "your child",
-      comicTitle: order.orderSession.comic.title,
-    })
+  const to = resolveRecipient(order.orderSession.notificationEmail, order.notificationEmail);
+  if (!to) return { sent: false, reason: "no_recipient_email" };
+
+  return safeSend(
+    to,
+    `${possessive(order.orderSession.childName)} book has arrived!`,
+    renderEmailShell(
+      renderOrderDeliveredBody({
+        childName: order.orderSession.childName,
+        comicTitle: order.orderSession.comic.title,
+      })
+    )
   );
-
-  return safeSend(order.notificationEmail, subject, html);
 }

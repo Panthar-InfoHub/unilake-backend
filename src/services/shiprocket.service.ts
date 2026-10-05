@@ -22,8 +22,47 @@ import {
   MAX_WEIGHT_KG,
   SHIPROCKET_STATUS_MAP,
 } from "../config/shipping.js";
-import type { OrderStatus } from "../generated/prisma/client.js";
-import { notifyOrderDelivered, notifyOrderShipped } from "./notification.service.js";
+import type { CoverType, OrderStatus } from "../generated/prisma/client.js";
+import { notifyAwbGenerated, notifyOrderDelivered } from "./notification.service.js";
+
+/**
+ * Shiprocket's public tracking page for an AWB. Works from the moment the AWB
+ * is assigned (shows "awaiting pickup" until the first scan).
+ *
+ * ⚠️ Built from Shiprocket's standard public pattern, not returned by their
+ * API at this stage. Once a real shipment is scanned, compare this against the
+ * track_url that refresh-tracking stores and adjust here if they differ.
+ */
+export function buildShiprocketTrackingUrl(awbCode: string): string {
+  return `https://shiprocket.co/tracking/${encodeURIComponent(awbCode)}`;
+}
+
+/**
+ * Product name sent to Shiprocket as order_items[0].name — shows on the
+ * shipping label so the packer can match the right box to the right order.
+ *
+ * Format: `[Child Name]_[HARDCOVER|SOFTCOVER]_[Book Title]`, e.g.
+ * "Aarav_HARDCOVER_The Magic Treehouse". Spaces inside the name and title are
+ * kept as-is; coverType is the raw enum value.
+ *
+ * Shared by Phase A (createOrder) and Phase B (updateOrder) so the two calls
+ * always send the same name. Phase B re-sends it, so an order created under an
+ * older format is renamed to this one when the admin confirms dimensions.
+ *
+ * childName is required before generation, so it should always be present by
+ * this stage. If it is ever missing, the segment is dropped rather than
+ * failing the shipment: "HARDCOVER_The Magic Treehouse".
+ */
+function buildShiprocketProductName(
+  childName: string | null,
+  coverType: CoverType,
+  comicTitle: string
+): string {
+  const trimmedChildName = childName?.trim();
+  return [trimmedChildName, coverType, comicTitle]
+    .filter((segment): segment is string => Boolean(segment))
+    .join("_");
+}
 
 // ============================================================
 // SHIPROCKET SERVICE — Phase A & Phase B business logic
@@ -171,11 +210,11 @@ export async function createShipmentForSession(
       phone: order.shippingPhone!,
     },
     item: {
-      // Label shows this. Include child name if available so the admin can
-      // eyeball the right box for the right customer.
-      name: session.childName
-        ? `${session.comic.title} — for ${session.childName}`
-        : session.comic.title,
+      name: buildShiprocketProductName(
+        session.childName,
+        order.coverType,
+        session.comic.title
+      ),
       sku: session.comic.id,
       units: 1,
       // amount is Decimal; toNumber() is safe here — INR max ~10^4 for a single book.
@@ -190,6 +229,11 @@ export async function createShipmentForSession(
       weight: DEFAULT_PACKAGE_WEIGHT_KG,
     },
   };
+
+  logger.debug(
+    { orderSessionId, orderId: order.id, productName: params.item.name },
+    "[Shiprocket Service] Phase A — product name being sent to Shiprocket"
+  );
 
   const result = await shiprocketCreateOrder(params);
 
@@ -501,9 +545,11 @@ export async function pushDimensionsAssignAwbAndSchedulePickup(
       phone: order.shippingPhone!,
     },
     item: {
-      name: order.orderSession.childName
-        ? `${order.orderSession.comic.title} — for ${order.orderSession.childName}`
-        : order.orderSession.comic.title,
+      name: buildShiprocketProductName(
+        order.orderSession.childName,
+        order.coverType,
+        order.orderSession.comic.title
+      ),
       sku: order.orderSession.comic.id,
       units: 1,
       sellingPrice: Number(order.amount),
@@ -512,6 +558,11 @@ export async function pushDimensionsAssignAwbAndSchedulePickup(
     subTotal: Number(order.amount),
     dimensions,
   };
+
+  logger.debug(
+    { orderId, productName: params.item.name },
+    "[Shiprocket Service] Phase B — product name being sent to Shiprocket"
+  );
 
   await shiprocketUpdateOrder(params);
   logger.info({ orderId }, "[Shiprocket Service] Phase B — updateOrder done");
@@ -528,6 +579,11 @@ export async function pushDimensionsAssignAwbAndSchedulePickup(
       courierId: awbResult.courierId,
       courierName: awbResult.courierName,
       awbGeneratedAt: awbResult.awbGeneratedAt,
+      // Shiprocket's track API returns no URL until the courier's first scan,
+      // so the public link is built from the AWB now — the customer email
+      // below and the admin panel then show the same link immediately. A later
+      // refresh-tracking overwrites it with Shiprocket's own track_url.
+      trackingUrl: buildShiprocketTrackingUrl(awbResult.awbCode),
     },
   });
 
@@ -535,6 +591,18 @@ export async function pushDimensionsAssignAwbAndSchedulePickup(
     { orderId, awbCode: awbResult.awbCode, courierName: awbResult.courierName },
     "[Shiprocket Service] Phase B — assignAwb done"
   );
+
+  // Packed-and-ready email — exactly once: Phase B refuses to run again once
+  // awbNumber is set (guard above). Sent here, after the AWB rather than after
+  // pickup, because the AWB is the admin action this email announces; a
+  // pickup-scheduling failure below is an ops problem and the tracking link is
+  // valid regardless. Fire-and-forget — never blocks the admin response.
+  notifyAwbGenerated(orderId).catch((err) => {
+    logger.error(
+      { orderId, err },
+      "[Shiprocket Service] notifyAwbGenerated failed (swallowed)"
+    );
+  });
 
   // 4. Generate pickup
   const pickupResult = await shiprocketGeneratePickup({
@@ -728,16 +796,10 @@ export async function processShiprocketStatusUpdate(
           "[Shiprocket Webhook] Order.status flipped"
         );
 
-        // Trigger user notifications on the two customer-visible transitions.
-        if (mappedStatus === "SHIPPED") {
-          // Fire-and-forget: email failure must never fail the webhook.
-          notifyOrderShipped(order.id).catch((err) => {
-            logger.error(
-              { orderId: order.id, err },
-              "[Shiprocket Webhook] notifyOrderShipped failed (swallowed)"
-            );
-          });
-        }
+        // Delivered is the only customer email from this webhook. There is
+        // deliberately no "shipped" email: the AWB email (Phase B) already
+        // carries the tracking link, so a second one at first scan would be
+        // redundant. Fire-and-forget: email failure must never fail the webhook.
         if (mappedStatus === "DELIVERED") {
           notifyOrderDelivered(order.id).catch((err) => {
             logger.error(

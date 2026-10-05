@@ -77,6 +77,12 @@ function htmlToPlainText(html: string): string {
   return html
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<script[\s\S]*?<\/script>/gi, "")
+    // Keep link targets: a button is just "See the preview" once its tags are
+    // stripped, and the HTML no longer prints the raw URL beside it.
+    .replace(
+      /<a\s[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi,
+      (_, href: string, label: string) => `${label.replace(/<[^>]+>/g, "").trim()}: ${href}`
+    )
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>/gi, "\n\n")
     .replace(/<[^>]+>/g, "")

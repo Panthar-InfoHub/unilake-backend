@@ -17,10 +17,90 @@ import type { Prisma } from "../generated/prisma/client.js";
  * customer needs to see on the list card.
  */
 
+/**
+ * The generated cover for the customer's own order views, plus the page's
+ * real pixel size so the card can draw it at its true shape (landscape or
+ * portrait) instead of cropping it into a fixed frame.
+ */
+export type UserGeneratedCover = GeneratedCover & {
+  /** Page 1's artwork size. Null only if the page has no artwork dimensions. */
+  width: number | null;
+  height: number | null;
+};
+
+/**
+ * Generated covers for a batch of sessions, in ONE query — same rule as the
+ * admin screens (pickGeneratedCover): the variant that was sent to print wins,
+ * otherwise page 1's newest finished variant. Sessions with nothing generated
+ * are simply absent from the map; the client falls back to the marketing
+ * thumbnail.
+ */
+async function getUserGeneratedCovers(
+  sessionIds: string[]
+): Promise<Map<string, UserGeneratedCover>> {
+  const covers = new Map<string, UserGeneratedCover>();
+  if (sessionIds.length === 0) return covers;
+
+  const rows = await prisma.pageVersion.findMany({
+    where: {
+      orderSessionId: { in: sessionIds },
+      page: { pageNumber: COVER_PAGE_NUMBER },
+      status: "SD_READY",
+    },
+    select: {
+      orderSessionId: true,
+      variantIndex: true,
+      isSelected: true,
+      displayImageUrl: true,
+      finalImageUrl: true,
+      page: { select: { artworkWidth: true, artworkHeight: true } },
+    },
+  });
+
+  const rowsBySession = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const existing = rowsBySession.get(row.orderSessionId);
+    if (existing) {
+      existing.push(row);
+    } else {
+      rowsBySession.set(row.orderSessionId, [row]);
+    }
+  }
+
+  for (const [sessionId, sessionRows] of rowsBySession) {
+    const cover = pickGeneratedCover(sessionRows);
+    if (!cover) continue;
+
+    // Every candidate is page 1 of the same comic, so any row's page carries
+    // the right dimensions.
+    const page = sessionRows[0]!.page;
+    covers.set(sessionId, {
+      ...cover,
+      width: page.artworkWidth,
+      height: page.artworkHeight,
+    });
+  }
+
+  return covers;
+}
+
 export async function listUserOrders(userId: string) {
   const orders = await prisma.order.findMany({
     where: {
       orderSession: { userId },
+      // Abandoned checkouts drop off the customer's list once their session's
+      // expiry window has passed: an unpaid (CREATED) order whose session is past
+      // expiresAt. Paid orders always show, however old.
+      //
+      // List-only, by decision — nothing is written. AWAITING_PAYMENT sessions
+      // stay exempt from expiry (EXPIRY_EXEMPT_STATUSES), so a customer who
+      // still pays through an old Razorpay window is processed normally by the
+      // webhook and the order reappears here as paid. The detail endpoint and
+      // the admin list are deliberately unfiltered.
+      NOT: {
+        status: "CREATED",
+        orderSession: { expiresAt: { lt: new Date() } },
+      },
     },
     orderBy: { createdAt: "desc" },
     select: {
@@ -41,10 +121,17 @@ export async function listUserOrders(userId: string) {
       },
     },
   });
+  const covers = await getUserGeneratedCovers(
+    orders.map((order) => order.orderSession.id)
+  );
+
   return orders.map((order) => ({
     id: order.id,
     sessionId: order.orderSession.id,
     comic: order.orderSession.comic,
+    // Null when nothing is generated yet — the client shows the comic's
+    // marketing thumbnail instead.
+    generatedCover: covers.get(order.orderSession.id) ?? null,
     coverType: order.coverType,
     amount: order.amount.toString(),
     currency: order.currency,
@@ -88,10 +175,13 @@ export async function getUserOrder(orderId: string, userId: string) {
     throw new ForbiddenError("You do not have permission to view this order");
   }
 
+  const covers = await getUserGeneratedCovers([order.orderSession.id]);
+
   return {
     id: order.id,
     sessionId: order.orderSession.id,
     comic: order.orderSession.comic,
+    generatedCover: covers.get(order.orderSession.id) ?? null,
     coverType: order.coverType,
     amount: order.amount.toString(),
     currency: order.currency,
