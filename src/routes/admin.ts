@@ -222,6 +222,10 @@ import {
   updateUserRoleHandler,
 } from "../controllers/user.controller.js";
 import { updateUserRoleSchema } from "../validators/user.schema.js";
+import {
+  exportAdminCustomersHandler,
+  listAdminCustomersHandler,
+} from "../controllers/customer.controller.js";
 
 const router = Router();
 
@@ -543,6 +547,12 @@ router.patch(
   validateBody(updateUserRoleSchema),
   updateUserRoleHandler
 );
+
+// CUSTOMERS (accounts with at least one paid order)
+// Read-only. Both paths are literal — no /customers/:id route exists — so
+// there is no ordering hazard. /export returns a CSV file, not JSON.
+router.get("/customers", listAdminCustomersHandler);
+router.get("/customers/export", exportAdminCustomersHandler);
 
 // SITE PAGES (privacy / terms / refund)
 // No create or delete: the slug set is fixed by the SitePageSlug enum, so the

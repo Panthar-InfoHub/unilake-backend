@@ -122,7 +122,7 @@ model Theme {
 model Comic {
   id                 String      @id @default(uuid())
   title              String
-  genderTag          GenderTag
+  genderTags         GenderTag[] @default([])
   pageCount          Int
   freePreviewPages   Int
   coverThumbnailUrls String[]    @default([])
@@ -144,10 +144,9 @@ model Comic {
 
   isBestseller Boolean @default(false)
 
-  description String?   @db.Text
-  themeId     String?
-  theme       Theme?    @relation(fields: [themeId], references: [id])
-  ageGroup    AgeGroup?
+  description String?    @db.Text
+  themes      Theme[]
+  ageGroups   AgeGroup[] @default([])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -793,7 +792,6 @@ model ComicFact {
   @@index([comicId, placement, isActive])
   @@map("comic_facts")
 }
-
 
 enum ContactEnquiryStatus {
   OPEN

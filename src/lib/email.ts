@@ -28,9 +28,10 @@ const SEND_RETRY_DELAY_MS = 500;
 
 // Where customer replies go. Every email is sent FROM noreply@unilakekids.com,
 // which has no inbox (the domain has no MX record), so without this a reply
-// bounces. The templates in notification.service.ts invite customers to reply
-// ("Reply to this email and our team will get back to you"), so this must
-// point at a mailbox someone reads. Hardcoded by decision — change it here.
+// bounces. The templates in notification.service.ts ask customers NOT to reply
+// and to use the support email / WhatsApp instead — but some will reply
+// anyway, so this must still point at a mailbox someone reads. Hardcoded by
+// decision — change it here.
 const REPLY_TO_ADDRESS = "unilake.books@gmail.com";
 
 // Single Resend client instance, reused across all sends. SDK is thread-safe.
@@ -84,17 +85,42 @@ function isRetryableError(err: unknown): boolean {
  */
 function htmlToPlainText(html: string): string {
   return html
+    // <head> holds only the <title>, which would otherwise print as a
+    // duplicate first line above the visible header.
+    .replace(/<head[\s\S]*?<\/head>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     // Keep link targets: a button is just "See the preview" once its tags are
     // stripped, and the HTML no longer prints the raw URL beside it.
+    //
+    // A link whose label already IS its address (the footer's
+    // "support@unilakekids.com" → mailto:) stays just the label, rather than
+    // "support@unilakekids.com: mailto:support@unilakekids.com".
     .replace(
       /<a\s[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi,
-      (_, href: string, label: string) => `${label.replace(/<[^>]+>/g, "").trim()}: ${href}`
+      (_, href: string, label: string) => {
+        const text = label.replace(/<[^>]+>/g, "").trim();
+        const bareHref = href.replace(/^(mailto|tel):/i, "");
+        return text === bareHref ? text : `${text}: ${href}`;
+      }
     )
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>/gi, "\n\n")
     .replace(/<[^>]+>/g, "")
+    // Undo the HTML escaping the templates apply (escapeHtml in
+    // notification.service.ts), so "Aarav&#39;s" reads "Aarav's". Runs AFTER
+    // tag stripping, so a decoded "<" can never form a tag. &amp; goes last so
+    // "&amp;lt;" correctly becomes "&lt;", not "<".
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    // The HTML is indented source; drop that indentation from every line.
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }

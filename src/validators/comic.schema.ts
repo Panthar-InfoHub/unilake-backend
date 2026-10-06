@@ -1,5 +1,65 @@
 import { z } from "zod";
 
+// ============================================================
+// Gender / age group / theme — each a LIST on the comic.
+// ============================================================
+//
+// Listed in display order. Saved lists are sorted into this order, so a comic
+// tagged GIRL then BOY is stored (and shown everywhere) as BOY, GIRL.
+const GENDER_TAGS = ["BOY", "GIRL", "UNISEX"] as const;
+const AGE_GROUPS = ["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"] as const;
+
+/** De-duplicates and sorts a list into the order of `order`. */
+const normalizeEnumList =
+  <T extends string>(order: readonly T[]) =>
+  (values: T[]): T[] =>
+    order.filter((value) => values.includes(value));
+
+/** At least one gender; duplicates removed; stored in GENDER_TAGS order. */
+const genderTagsField = z
+  .array(
+    z.enum(GENDER_TAGS, {
+      message: "Each gender must be exactly BOY, GIRL, or UNISEX",
+    }),
+    { message: "Genders must be a list" }
+  )
+  .min(1, "Pick at least one gender")
+  .transform(normalizeEnumList(GENDER_TAGS));
+
+/** At least one age group; duplicates removed; stored youngest first. */
+const ageGroupsField = z
+  .array(z.enum(AGE_GROUPS, { message: "Invalid age group" }), {
+    message: "Age groups must be a list",
+  })
+  .min(1, "Pick at least one age group")
+  .transform(normalizeEnumList(AGE_GROUPS));
+
+/** At least one theme id; duplicates removed. Existence is checked in the service. */
+const themeIdsField = z
+  .array(z.string().uuid("Invalid theme ID"), {
+    message: "Themes must be a list",
+  })
+  .min(1, "Pick at least one theme")
+  .transform((ids) => [...new Set(ids)]);
+
+/**
+ * A multi-value query-string filter: `?ageGroup=AGE_3_5,AGE_6_8`.
+ *
+ * Comma-separated so the frontend sends one parameter per filter; a single
+ * value (`?ageGroup=AGE_3_5`) is just a one-item list, so older links still
+ * work. A repeated parameter (`?ageGroup=a&ageGroup=b`, which Express parses
+ * as an array) is accepted too. Empty input means "no filter" — undefined.
+ */
+const csvListQuery = <T extends z.ZodTypeAny>(item: T) =>
+  z.preprocess((raw) => {
+    if (raw === undefined || raw === null) return undefined;
+    const parts = (Array.isArray(raw) ? raw : [raw])
+      .flatMap((part) => String(part).split(","))
+      .map((part) => part.trim())
+      .filter(Boolean);
+    return parts.length > 0 ? [...new Set(parts)] : undefined;
+  }, z.array(item).optional());
+
 export const createComicSchema = z
   .object({
     title: z
@@ -7,10 +67,7 @@ export const createComicSchema = z
       .min(1, "Title cannot be empty")
       .max(255, "Title is too long"),
 
-    genderTag: z.enum(["BOY", "GIRL", "UNISEX"] as const, {
-      message:
-        "Gender tag is required and must be exactly BOY, GIRL, or UNISEX",
-    }),
+    genderTags: genderTagsField,
 
     pageCount: z
       .number({ message: "Page count is required" })
@@ -65,8 +122,8 @@ export const createComicSchema = z
     loraKey: z.string().min(1).optional(),
     loraStrength: z.number().min(0).max(2).optional(),
     description: z.string().min(1).optional(),
-    themeId: z.string().uuid("Invalid theme ID").optional(),
-    ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
+    themeIds: themeIdsField,
+    ageGroups: ageGroupsField,
     isBestseller: z.boolean().optional(),
   })
   .refine((data) => data.freePreviewPages < data.pageCount, {
@@ -102,21 +159,24 @@ export const updateComicStatusSchema = z.object({
   }),
 });
 
+// Each filter takes one or more comma-separated values. Within a filter a
+// comic matches if it has ANY of them; across filters it must match ALL.
 export const comicFilterQuerySchema = z.object({
-  gender: z
-    .enum(["BOY", "GIRL", "UNISEX"], {
+  gender: csvListQuery(
+    z.enum(GENDER_TAGS, {
       message: "Invalid gender filter. Must be BOY, GIRL, or UNISEX.",
     })
-    .optional(),
-  ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
-  themeId: z.string().uuid("Invalid theme ID").optional(),
+  ),
+  ageGroup: csvListQuery(z.enum(AGE_GROUPS, { message: "Invalid age group filter." })),
+  themeId: csvListQuery(z.string().uuid("Invalid theme ID")),
   search: z.string().optional(), // Marks it as optional so /api/comics works without it
 });
 
 export const updateComicSchema = z
   .object({
     title: z.string().min(1).optional(),
-    genderTag: z.enum(["BOY", "GIRL", "UNISEX"]).optional(),
+    // Optional, but never empty when sent — an edit cannot clear these.
+    genderTags: genderTagsField.optional(),
     pageCount: z.number().int().positive().optional(),
     freePreviewPages: z.number().int().positive().optional(),
     loraStrength: z.number().min(0).max(2).optional(),
@@ -152,8 +212,9 @@ export const updateComicSchema = z
       .nullable()
       .optional(),
     description: z.string().min(1).optional(),
-    themeId: z.string().uuid("Invalid theme ID").optional(),
-    ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
+    // Replaces the comic's whole theme set when sent.
+    themeIds: themeIdsField.optional(),
+    ageGroups: ageGroupsField.optional(),
     isBestseller: z.boolean().optional(),
   })
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
@@ -196,10 +257,11 @@ export const getComicVideoUploadUrlSchema = z.object({
     ),
 });
 
+// Same multi-value contract as comicFilterQuerySchema.
 export const adminComicFilterQuerySchema = z.object({
-  gender: z.enum(["BOY", "GIRL", "UNISEX"]).optional(),
-  ageGroup: z.enum(["AGE_0_2", "AGE_3_5", "AGE_6_8", "AGE_9_12"]).optional(),
-  themeId: z.string().uuid("Invalid theme ID").optional(),
+  gender: csvListQuery(z.enum(GENDER_TAGS, { message: "Invalid gender filter." })),
+  ageGroup: csvListQuery(z.enum(AGE_GROUPS, { message: "Invalid age group filter." })),
+  themeId: csvListQuery(z.string().uuid("Invalid theme ID")),
   search: z.string().optional(),
 });
 

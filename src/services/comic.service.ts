@@ -47,6 +47,32 @@ const normalizeThumbnailInput = (input: string): string => {
   return input.startsWith(prefix) ? input.slice(prefix.length) : input;
 };
 
+/**
+ * Throws a 400 when any of the given theme ids does not exist.
+ *
+ * Without this, `connect` / `set` on a missing theme fails inside Prisma with
+ * a P2025 that surfaces as an opaque 500. A theme can legitimately vanish
+ * between the admin loading the form and saving it (deleted in another tab),
+ * so this is a user-facing error, not a programming one.
+ *
+ * `ids` is already de-duplicated by the Zod schema, so the count comparison is
+ * exact.
+ */
+const assertThemesExist = async (ids: string[]): Promise<void> => {
+  const found = await prisma.theme.count({ where: { id: { in: ids } } });
+  if (found !== ids.length) {
+    throw new ValidationError(
+      "One or more selected themes no longer exist. Refresh the page and pick again."
+    );
+  }
+};
+
+/** Shape every comic response uses for its themes — alphabetical, id + name. */
+const THEMES_SELECT = {
+  select: { id: true, name: true },
+  orderBy: { name: "asc" },
+} as const;
+
 export const generateThumbnailUploadUrl = async (
   fileName: string,
   contentType: string
@@ -108,7 +134,9 @@ export const createComic = async (data: CreateComicInput) => {
       "Attempting to create new comic catalogue item..."
     );
 
-    const { thumbnailKeys, pricing, loraKey, ...restData } = data;
+    // themeIds is not a column — it becomes the comic <-> theme links below.
+    const { thumbnailKeys, pricing, loraKey, themeIds, ...restData } = data;
+    await assertThemesExist(themeIds);
     // Create only ever receives fresh keys today, but normalizing here keeps
     // create and update behaving identically for any future caller.
     const coverThumbnailUrls = thumbnailKeys.map((entry) =>
@@ -121,6 +149,7 @@ export const createComic = async (data: CreateComicInput) => {
           ...restData,
           coverThumbnailUrls,
           status: "DRAFT",
+          themes: { connect: themeIds.map((id) => ({ id })) },
           ...(loraKey !== undefined && { loraFileUrl: loraKey }),
         },
       });
@@ -168,7 +197,7 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     let oldR2KeysToDelete: string[] = [];
 
     if (data.title !== undefined) updateData.title = data.title;
-    if (data.genderTag !== undefined) updateData.genderTag = data.genderTag;
+    if (data.genderTags !== undefined) updateData.genderTags = data.genderTags;
     if (data.pageCount !== undefined) updateData.pageCount = data.pageCount;
     if (data.freePreviewPages !== undefined) updateData.freePreviewPages = data.freePreviewPages;
     if (data.loraStrength !== undefined) updateData.loraStrength = data.loraStrength;
@@ -210,8 +239,13 @@ export const updateComic = async (comicId: string, data: UpdateComicInput) => {
     if (data.metaTitle !== undefined) updateData.metaTitle = data.metaTitle;
     if (data.metaDescription !== undefined)
       updateData.metaDescription = data.metaDescription;
-    if (data.themeId !== undefined) updateData.theme = { connect: { id: data.themeId } };
-    if (data.ageGroup !== undefined) updateData.ageGroup = data.ageGroup;
+    // `set`, not `connect`: the sent list REPLACES the comic's themes, so a
+    // theme the admin un-ticked is unlinked rather than kept.
+    if (data.themeIds !== undefined) {
+      await assertThemesExist(data.themeIds);
+      updateData.themes = { set: data.themeIds.map((id) => ({ id })) };
+    }
+    if (data.ageGroups !== undefined) updateData.ageGroups = data.ageGroups;
     if (data.isBestseller !== undefined) updateData.isBestseller = data.isBestseller;
     // if (data.generationPrompt !== undefined)
     //   updateData.generationPrompt = data.generationPrompt;
@@ -494,22 +528,38 @@ export const updateComicStatus = async (
   }
 };
 
+/**
+ * Gender / age / theme filters, shared by the public and admin lists.
+ *
+ * Each filter is a list. Within one filter a comic matches if it has ANY of
+ * the values (`hasSome` / `some`); across filters every given filter must
+ * match, because they are separate keys of the same where object.
+ */
+const buildTagFilters = (
+  filters: ComicFilterQueryInput | AdminComicFilterQueryInput
+): Prisma.ComicWhereInput => {
+  const where: Prisma.ComicWhereInput = {};
+
+  if (filters.gender?.length) {
+    where.genderTags = { hasSome: filters.gender };
+  }
+
+  if (filters.ageGroup?.length) {
+    where.ageGroups = { hasSome: filters.ageGroup };
+  }
+
+  if (filters.themeId?.length) {
+    where.themes = { some: { id: { in: filters.themeId } } };
+  }
+
+  return where;
+};
+
 export const getPublicComicsList = async (filters: ComicFilterQueryInput) => {
   const where: Prisma.ComicWhereInput = {
     status: "PUBLISHED",
+    ...buildTagFilters(filters),
   };
-
-  if (filters.gender !== undefined) {
-    where.genderTag = filters.gender;
-  }
-
-  if (filters.ageGroup !== undefined) {
-    where.ageGroup = filters.ageGroup;
-  }
-
-  if (filters.themeId !== undefined) {
-    where.themeId = filters.themeId;
-  }
 
   if (filters.search !== undefined && filters.search.trim() !== "") {
     where.title = {
@@ -524,17 +574,12 @@ export const getPublicComicsList = async (filters: ComicFilterQueryInput) => {
       id: true,
       title: true,
       description: true,
-      genderTag: true,
-      ageGroup: true,
+      genderTags: true,
+      ageGroups: true,
       isBestseller: true,
       pageCount: true,
       coverThumbnailUrls: true,
-      theme: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
+      themes: THEMES_SELECT,
       pricingRules: {
         select: {
           mrp: true,
@@ -569,8 +614,8 @@ export const getPublicComicDetails = async (comicId: string) => {
       id: true,
       title: true,
       description: true,
-      genderTag: true,
-      ageGroup: true,
+      genderTags: true,
+      ageGroups: true,
       isBestseller: true,
       pageCount: true,
       freePreviewPages: true,
@@ -598,12 +643,7 @@ export const getPublicComicDetails = async (comicId: string) => {
         },
         orderBy: { createdAt: "asc" },
       },
-      theme: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
+      themes: THEMES_SELECT,
       pricingRules: {
         select: {
           coverType: true,
@@ -661,19 +701,7 @@ export const getLoraUploadUrl = async (input: GetLoraUploadUrlInput) => {
 };
 
 export async function getAdminComicsList(filters: AdminComicFilterQueryInput) {
-  const where: Prisma.ComicWhereInput = {};
-
-  if (filters.gender !== undefined) {
-    where.genderTag = filters.gender;
-  }
-
-  if (filters.ageGroup !== undefined) {
-    where.ageGroup = filters.ageGroup;
-  }
-
-  if (filters.themeId !== undefined) {
-    where.themeId = filters.themeId;
-  }
+  const where: Prisma.ComicWhereInput = buildTagFilters(filters);
 
   if (filters.search !== undefined && filters.search.trim() !== "") {
     where.title = {
@@ -685,12 +713,7 @@ export async function getAdminComicsList(filters: AdminComicFilterQueryInput) {
   const comics = await prisma.comic.findMany({
     where,
     include: {
-      theme: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
+      themes: THEMES_SELECT,
       _count: {
         select: {
           pages: true,
@@ -709,12 +732,7 @@ export const getAdminComicDetail = async (comicId: string) => {
   const comic = await prisma.comic.findUnique({
     where: { id: comicId },
     include: {
-      theme: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
+      themes: THEMES_SELECT,
       pages: {
         orderBy: { pageNumber: "asc" },
         include: {

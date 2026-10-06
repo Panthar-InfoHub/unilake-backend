@@ -1,2 +1,0 @@
-- complete the update endpoint for editing the comic details in the database
-- make the delete endpoints for country and comic
