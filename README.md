@@ -413,8 +413,11 @@ won't apply in the image.
    rename or restructure a field, which deletes data. If existing data must
    survive, hand-edit the file: add the new shape, copy the data across, and
    only then drop the old columns.
-   `20261007120000_comic_multi_gender_age_theme` is a worked example — and is
-   hand-ordered on purpose, so never regenerate it.
+   `20261006201804_comic_multi_gender_age_theme` is the cautionary example:
+   it is Prisma's unedited output, and applying it wiped every comic's
+   gender, age group and theme in production. It stays in the history
+   because production has applied it — never edit or delete a migration that
+   has already been applied anywhere; fix forward with a new one.
 4. Apply it to your dev database (`npx prisma migrate deploy`), run
    `npx prisma generate`, then `npx tsc --noEmit`.
 5. Commit the migration together with the code that depends on it.
